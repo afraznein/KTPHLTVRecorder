@@ -1,0 +1,19 @@
+# Local dev files (not committed)
+CLAUDE.md
+compile.sh
+nul
+
+# Compiled plugins (source is authoritative)
+compiled/
+
+# Editor/IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
