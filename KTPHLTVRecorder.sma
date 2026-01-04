@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.0.0
+/* KTP HLTV Recorder v1.0.4
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.0.0
- * DATE: 2025-12-24
+ * VERSION: 1.0.4
+ * DATE: 2025-12-31
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -20,8 +20,8 @@
  *   hltv_rcon = ktpadmin
  *
  * DEMO NAMING:
- *   Format: <matchtype>_<matchid>_<map>.dem
- *   Example: ktp_KTP-1735052400-dod_anzio_dod_anzio.dem
+ *   Format: <matchtype>_<matchid>.dem
+ *   Example: ktp_KTP-1735052400-dod_anzio.dem
  */
 
 #include <amxmodx>
@@ -29,7 +29,7 @@
 #include <sockets>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.0.4"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Match types (must match KTPMatchHandler enum)
@@ -60,9 +60,33 @@ public plugin_init() {
         PLUGIN_NAME, PLUGIN_VERSION, g_hltvIp, g_hltvPort, g_hltvEnabled);
 }
 
+// Player joined - schedule version display
+public client_putinserver(id) {
+    // Skip bots and HLTV
+    if (is_user_bot(id) || is_user_hltv(id))
+        return;
+
+    // Delayed version announcement (5 seconds)
+    set_task(5.0, "fn_version_display", id);
+}
+
+public fn_version_display(id) {
+    // Safety check - player may have disconnected during delay
+    if (!is_user_connected(id))
+        return;
+
+    // Version announcement
+    client_print(id, print_chat, "%s version %s by %s", PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
+}
+
 // Forward from KTPMatchHandler - match started
 public ktp_match_start(const matchId[], const map[], MatchType:matchType) {
-    if (!g_hltvEnabled) return;
+    log_amx("[KTP HLTV] ktp_match_start received: matchId=%s map=%s type=%d enabled=%d", matchId, map, matchType, g_hltvEnabled);
+
+    if (!g_hltvEnabled) {
+        log_amx("[KTP HLTV] Recording disabled (hltv_enabled=0)");
+        return;
+    }
 
     // Build demo name based on match type
     new demoName[128];
@@ -76,8 +100,8 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType) {
         default:                     copy(typeStr, charsmax(typeStr), "match");
     }
 
-    // Demo name format: type_matchid_map
-    formatex(demoName, charsmax(demoName), "%s_%s_%s", typeStr, matchId, map);
+    // Demo name format: type_matchid (matchId already contains map)
+    formatex(demoName, charsmax(demoName), "%s_%s", typeStr, matchId);
 
     // Store match ID for logging
     copy(g_currentMatchId, charsmax(g_currentMatchId), matchId);
@@ -135,13 +159,16 @@ stock load_config() {
         if (line[0] == ';' || line[0] == '/' || line[0] == '#' || line[0] == EOS)
             continue;
 
-        // Parse key = value
-        if (parse(line, key, charsmax(key), value, charsmax(value)) < 2)
-            continue;
+        // Find the = sign and split key/value
+        new eqPos = contain(line, "=");
+        if (eqPos < 1) continue;
 
-        // Remove = from key if present
-        replace(key, charsmax(key), "=", "");
+        // Extract key (before =)
+        copy(key, min(eqPos, charsmax(key)), line);
         trim(key);
+
+        // Extract value (after =)
+        copy(value, charsmax(value), line[eqPos + 1]);
         trim(value);
 
         if (equali(key, "hltv_enabled")) {

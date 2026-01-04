@@ -10,12 +10,12 @@ KTPHLTVRecorder hooks into [KTPMatchHandler](https://github.com/afraznein/KTPMat
 
 - Automatic recording for all match types (`.ktp`, `.scrim`, `.draft`, `.12man`)
 - 1:1 game server to HLTV pairing
-- Descriptive demo naming: `<type>_<matchid>_<map>.dem`
+- Descriptive demo naming: `<type>_<matchid>.dem` (matchId includes map)
 - UDP RCON communication with HLTV
 
 ## Requirements
 
-- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.1+
+- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.4+
 - AMX Mod X Sockets module
 - Paired HLTV instance per game server
 
@@ -45,14 +45,16 @@ Each game server needs its own config with its paired HLTV port:
 
 ## Demo Naming
 
-Format: `<matchtype>_<matchid>_<map>.dem`
+Format: `<matchtype>_<matchid>.dem`
+
+The matchId already contains the map name (e.g., `KTP-1735052400-dod_anzio`), so it's not duplicated.
 
 | Match Type | Example Demo Name |
 |------------|-------------------|
-| `.ktp`     | `ktp_KTP-1735052400-dod_anzio_dod_anzio.dem` |
-| `.scrim`   | `scrim_KTP-1735052400-dod_flash_dod_flash.dem` |
-| `.draft`   | `draft_KTP-1735052400-dod_avalanche_dod_avalanche.dem` |
-| `.12man`   | `12man_KTP-1735052400-dod_caen_dod_caen.dem` |
+| `.ktp`     | `ktp_KTP-1735052400-dod_anzio.dem` |
+| `.scrim`   | `scrim_KTP-1735052400-dod_flash.dem` |
+| `.draft`   | `draft_KTP-1735052400-dod_avalanche.dem` |
+| `.12man`   | `12man_KTP-1735052400-dod_caen.dem` |
 
 ## How It Works
 

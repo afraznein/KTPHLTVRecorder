@@ -2,6 +2,18 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.0.4] - 2026-01
+
+### Changed
+- Version bump for live server deployment
+- Tested with KTPMatchHandler v0.10.30
+
+## [1.0.1] - 2025-12-29
+
+### Changed
+- Demo naming simplified from `<type>_<matchid>_<map>.dem` to `<type>_<matchid>.dem`
+- Removed redundant map suffix since matchId already contains map name
+
 ## [1.0.0] - 2025-12-24
 
 ### Added
