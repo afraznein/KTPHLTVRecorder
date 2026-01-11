@@ -1,23 +1,23 @@
-/* KTP HLTV Recorder v1.0.4
+/* KTP HLTV Recorder v1.1.1
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.0.4
- * DATE: 2025-12-31
+ * VERSION: 1.1.1
+ * DATE: 2026-01-10
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
- * and sends RCON commands to a paired HLTV server to start/stop recording.
+ * and sends commands to HLTV servers via HTTP API (FIFO pipe injection).
  *
  * REQUIREMENTS:
  * - KTPMatchHandler v0.10.1+ (for ktp_match_start/ktp_match_end forwards)
- * - Sockets module (for UDP RCON to HLTV)
+ * - Curl module (for HTTP requests)
  *
  * CONFIGURATION (hltv_recorder.ini):
  *   hltv_enabled = 1
- *   hltv_ip = 74.91.112.242
+ *   hltv_api_url = http://74.91.112.242:8087
+ *   hltv_api_key = KTPVPS2026
  *   hltv_port = 27020
- *   hltv_rcon = ktpadmin
  *
  * DEMO NAMING:
  *   Format: <matchtype>_<matchid>.dem
@@ -26,10 +26,10 @@
 
 #include <amxmodx>
 #include <amxmisc>
-#include <sockets>
+#include <curl>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.0.4"
+#define PLUGIN_VERSION "1.1.1"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Match types (must match KTPMatchHandler enum)
@@ -37,18 +37,23 @@ enum MatchType {
     MATCH_TYPE_COMPETITIVE = 0,
     MATCH_TYPE_SCRIM = 1,
     MATCH_TYPE_12MAN = 2,
-    MATCH_TYPE_DRAFT = 3
+    MATCH_TYPE_DRAFT = 3,
+    MATCH_TYPE_KTP_OT = 4,
+    MATCH_TYPE_DRAFT_OT = 5
 };
 
 // Configuration
 new g_hltvEnabled = 0;
-new g_hltvIp[64];
+new g_hltvApiUrl[128];
+new g_hltvApiKey[64];
 new g_hltvPort = 27020;
-new g_hltvRcon[64];
 
 // State
 new bool:g_isRecording = false;
 new g_currentMatchId[64];
+
+// Curl state
+new curl_slist:g_curlHeaders = SList_Empty;
 
 public plugin_init() {
     register_plugin(PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
@@ -56,8 +61,8 @@ public plugin_init() {
     // Load configuration
     load_config();
 
-    server_print("[KTP HLTV] %s v%s loaded - HLTV: %s:%d (enabled=%d)",
-        PLUGIN_NAME, PLUGIN_VERSION, g_hltvIp, g_hltvPort, g_hltvEnabled);
+    server_print("[KTP HLTV] %s v%s loaded - API: %s port=%d (enabled=%d)",
+        PLUGIN_NAME, PLUGIN_VERSION, g_hltvApiUrl, g_hltvPort, g_hltvEnabled);
 }
 
 // Player joined - schedule version display
@@ -79,12 +84,25 @@ public fn_version_display(id) {
     client_print(id, print_chat, "%s version %s by %s", PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
 }
 
-// Forward from KTPMatchHandler - match started
-public ktp_match_start(const matchId[], const map[], MatchType:matchType) {
-    log_amx("[KTP HLTV] ktp_match_start received: matchId=%s map=%s type=%d enabled=%d", matchId, map, matchType, g_hltvEnabled);
+// Forward from KTPMatchHandler - match/half started
+// half: 1=1st half, 2=2nd half, 101+=OT round (101, 102, 103...)
+public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) {
+    new halfStr[16];
+    if (half <= 2) {
+        formatex(halfStr, charsmax(halfStr), "half=%d", half);
+    } else {
+        formatex(halfStr, charsmax(halfStr), "OT%d", half - 100);
+    }
+    log_amx("[KTP HLTV] ktp_match_start received: matchId=%s map=%s type=%d %s enabled=%d", matchId, map, matchType, halfStr, g_hltvEnabled);
 
     if (!g_hltvEnabled) {
         log_amx("[KTP HLTV] Recording disabled (hltv_enabled=0)");
+        return;
+    }
+
+    // Check if already recording the same match (idempotent - HLTV maintains connection through map changes)
+    if (g_isRecording && equal(g_currentMatchId, matchId)) {
+        log_amx("[KTP HLTV] Already recording match %s - continuing (%s)", matchId, halfStr);
         return;
     }
 
@@ -97,6 +115,8 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType) {
         case MATCH_TYPE_SCRIM:       copy(typeStr, charsmax(typeStr), "scrim");
         case MATCH_TYPE_12MAN:       copy(typeStr, charsmax(typeStr), "12man");
         case MATCH_TYPE_DRAFT:       copy(typeStr, charsmax(typeStr), "draft");
+        case MATCH_TYPE_KTP_OT:      copy(typeStr, charsmax(typeStr), "ktpOT");
+        case MATCH_TYPE_DRAFT_OT:    copy(typeStr, charsmax(typeStr), "draftOT");
         default:                     copy(typeStr, charsmax(typeStr), "match");
     }
 
@@ -106,14 +126,17 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType) {
     // Store match ID for logging
     copy(g_currentMatchId, charsmax(g_currentMatchId), matchId);
 
-    // Send record command to HLTV
-    if (send_hltv_rcon("record %s", demoName)) {
+    // Send record command to HLTV via HTTP API
+    new command[256];
+    formatex(command, charsmax(command), "record %s", demoName);
+
+    if (send_hltv_command(command)) {
         g_isRecording = true;
-        server_print("[KTP HLTV] Started recording: %s.dem", demoName);
-        log_amx("[KTP HLTV] Recording started: %s.dem (match_id=%s)", demoName, matchId);
+        server_print("[KTP HLTV] Started recording: %s.dem (%s)", demoName, halfStr);
+        log_amx("[KTP HLTV] Recording started: %s.dem (match_id=%s %s)", demoName, matchId, halfStr);
     } else {
         server_print("[KTP HLTV] Failed to start recording!");
-        log_amx("[KTP HLTV] ERROR: Failed to start recording (match_id=%s)", matchId);
+        log_amx("[KTP HLTV] ERROR: Failed to start recording (match_id=%s %s)", matchId, halfStr);
     }
 }
 
@@ -122,7 +145,7 @@ public ktp_match_end(const matchId[], const map[], MatchType:matchType, team1Sco
     if (!g_hltvEnabled || !g_isRecording) return;
 
     // Send stoprecording command to HLTV
-    if (send_hltv_rcon("stoprecording")) {
+    if (send_hltv_command("stoprecording")) {
         g_isRecording = false;
         server_print("[KTP HLTV] Stopped recording (match_id=%s, score=%d-%d)", matchId, team1Score, team2Score);
         log_amx("[KTP HLTV] Recording stopped: match_id=%s score=%d-%d", matchId, team1Score, team2Score);
@@ -173,47 +196,90 @@ stock load_config() {
 
         if (equali(key, "hltv_enabled")) {
             g_hltvEnabled = str_to_num(value);
-        } else if (equali(key, "hltv_ip")) {
-            copy(g_hltvIp, charsmax(g_hltvIp), value);
+        } else if (equali(key, "hltv_api_url")) {
+            copy(g_hltvApiUrl, charsmax(g_hltvApiUrl), value);
+        } else if (equali(key, "hltv_api_key")) {
+            copy(g_hltvApiKey, charsmax(g_hltvApiKey), value);
         } else if (equali(key, "hltv_port")) {
             g_hltvPort = str_to_num(value);
-        } else if (equali(key, "hltv_rcon")) {
-            copy(g_hltvRcon, charsmax(g_hltvRcon), value);
         }
     }
 
     fclose(file);
-    server_print("[KTP HLTV] Config loaded: %s:%d enabled=%d", g_hltvIp, g_hltvPort, g_hltvEnabled);
+    server_print("[KTP HLTV] Config loaded: api=%s port=%d enabled=%d", g_hltvApiUrl, g_hltvPort, g_hltvEnabled);
 }
 
-// Send RCON command to HLTV server via UDP
-stock bool:send_hltv_rcon(const fmt[], any:...) {
-    new command[256];
-    vformat(command, charsmax(command), fmt, 2);
-
-    // Build RCON packet: \xff\xff\xff\xffrcon <password> <command>
-    new packet[512];
-    formatex(packet, charsmax(packet), "%c%c%c%crcon %s %s",
-        0xFF, 0xFF, 0xFF, 0xFF, g_hltvRcon, command);
-
-    // Create UDP socket
-    new sockError;
-    new sock = socket_open(g_hltvIp, g_hltvPort, SOCKET_UDP, sockError);
-    if (sock < 0) {
-        server_print("[KTP HLTV] Socket error %d: could not connect to %s:%d", sockError, g_hltvIp, g_hltvPort);
+// Send command to HLTV server via HTTP API
+stock bool:send_hltv_command(const command[]) {
+    if (!g_hltvApiUrl[0]) {
+        log_amx("[KTP HLTV] ERROR: hltv_api_url not configured");
         return false;
     }
 
-    // Send packet
-    new packetLen = strlen(packet);
-    new sent = socket_send(sock, packet, packetLen);
-    socket_close(sock);
+    // Build URL: http://api/hltv/<port>/command
+    new url[256];
+    formatex(url, charsmax(url), "%s/hltv/%d/command", g_hltvApiUrl, g_hltvPort);
 
-    if (sent != packetLen) {
-        server_print("[KTP HLTV] Socket error: sent %d of %d bytes", sent, packetLen);
+    // Build JSON payload
+    new payload[512];
+    formatex(payload, charsmax(payload), "{^"command^":^"%s^"}", command);
+
+    // Create cURL handle
+    new CURL:curl = curl_easy_init();
+    if (!curl) {
+        log_amx("[KTP HLTV] ERROR: curl_easy_init() failed");
         return false;
     }
 
-    server_print("[KTP HLTV] RCON sent to %s:%d -> %s", g_hltvIp, g_hltvPort, command);
-    return true;
+    // Free any previous headers
+    if (g_curlHeaders != SList_Empty) {
+        curl_slist_free_all(g_curlHeaders);
+        g_curlHeaders = SList_Empty;
+    }
+
+    // Set URL
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+
+    // Set headers
+    g_curlHeaders = curl_slist_append(SList_Empty, "Content-Type: application/json");
+
+    new authHeader[128];
+    formatex(authHeader, charsmax(authHeader), "X-Auth-Key: %s", g_hltvApiKey);
+    g_curlHeaders = curl_slist_append(g_curlHeaders, authHeader);
+
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
+
+    // Set POST data
+    curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, payload);
+
+    // Set timeout (5 seconds)
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5);
+
+    // Debug log
+    log_amx("[KTP HLTV] Sending HTTP POST to %s: %s", url, payload);
+
+    // Perform request asynchronously
+    curl_easy_perform(curl, "hltv_api_callback");
+
+    return true;  // Request sent (async - actual success determined in callback)
+}
+
+// Callback for HTTP API response
+public hltv_api_callback(CURL:curl, CURLcode:code) {
+    if (code != CURLE_OK) {
+        new error[128];
+        curl_easy_strerror(code, error, charsmax(error));
+        log_amx("[KTP HLTV] HTTP API error: code=%d error='%s'", _:code, error);
+    } else {
+        log_amx("[KTP HLTV] HTTP API request successful");
+    }
+
+    // Cleanup curl handle
+    curl_easy_cleanup(curl);
+
+    // Free headers
+    if (g_curlHeaders != SList_Empty) {
+        curl_slist_free_all(g_curlHeaders);
+        g_curlHeaders = SList_Empty;
+    }
 }

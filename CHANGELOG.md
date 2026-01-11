@@ -2,6 +2,56 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.1.1] - 2026-01-10
+
+### Added
+- Support for new explicit overtime match types (`MATCH_TYPE_KTP_OT`, `MATCH_TYPE_DRAFT_OT`)
+- Demo naming: `ktpOT_<matchid>.dem` and `draftOT_<matchid>.dem`
+
+### Changed
+- Updated MatchType enum to match KTPMatchHandler v0.10.43
+
+## [1.1.0] - 2026-01-10
+
+### Changed
+- **Breaking**: Switched from UDP RCON to HTTP API communication
+- Replaced Sockets module dependency with Curl module
+- Commands now sent via HTTP POST to data server API (port 8087)
+- API injects commands to HLTV via FIFO pipes
+
+### Why
+- GoldSrc HLTV doesn't support standard UDP RCON protocol
+- FIFO pipe injection provides reliable command delivery
+- HTTP API allows centralized HLTV control from any game server
+
+### Config Changes
+- Removed: `hltv_ip`, `hltv_rcon`
+- Added: `hltv_api_url`, `hltv_api_key`
+- Kept: `hltv_enabled`, `hltv_port`
+
+## [1.0.7] - 2026-01-09
+
+### Changed
+- Rewrote RCON to try simple RCON first (works with most HLTV versions)
+- Falls back to challenge-response if server requires it
+- Assumes success if no response (HLTV often doesn't ack successful commands)
+- Added extensive AMX logging for debugging RCON issues
+- Fixed packet building to manually set 0xFF header bytes
+
+## [1.0.6] - 2026-01-09
+
+### Changed
+- Implemented challenge-response RCON protocol
+- HLTV was rejecting simple RCON with "Invalid rcon challenge"
+- Now requests challenge first, parses response, then sends command with challenge
+
+## [1.0.5] - 2026-01-09
+
+### Changed
+- Updated to handle new `ktp_match_start(matchId, map, type, half)` signature
+- Idempotent recording - continues existing recording through map changes
+- Added half parameter logging (1=first half, 2=second half, 101+=OT rounds)
+
 ## [1.0.4] - 2026-01
 
 ### Changed
