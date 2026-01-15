@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-Automatic HLTV demo recording for KTP competitive matches.
+**Version 1.2.2** - Automatic HLTV demo recording for KTP competitive matches.
 
 ## Overview
 
@@ -12,6 +12,7 @@ KTPHLTVRecorder hooks into [KTPMatchHandler](https://github.com/afraznein/KTPMat
 - 1:1 game server to HLTV pairing
 - Descriptive demo naming: `<type>_<matchid>.dem` (matchId includes map)
 - HTTP API communication with HLTV control service
+- **Admin HLTV restart command** - `.hltvrestart` to restart paired HLTV instance
 
 ## Requirements
 
@@ -80,6 +81,26 @@ Requires WSL with KTPAMXX compiler:
 ```bash
 ./compile.sh
 ```
+
+## Version History
+
+### v1.2.2 (2026-01-13)
+- 🔧 **FIXED: Orphaned recording bug** - Sends stoprecording on plugin startup/shutdown
+
+### v1.2.1 (2026-01-13)
+- ✅ **ADDED: Discord audit notifications** for `.hltvrestart` command
+
+### v1.2.0 (2026-01-13)
+- ✅ **ADDED: `.hltvrestart` admin command** - Restart paired HLTV from game server
+
+### v1.1.1 (2026-01-10)
+- ✅ **ADDED: Explicit OT match types** - `ktpOT` and `draftOT` demo naming
+
+### v1.1.0 (2026-01-10)
+- 🔧 **CHANGED: HTTP API communication** - Replaced UDP RCON with HTTP API via FIFO pipes
+
+### v1.0.0 (2025-12-24)
+- 🎉 **Initial release** - Auto HLTV recording via KTPMatchHandler forwards
 
 ## License
 

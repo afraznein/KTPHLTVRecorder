@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.1.1
+/* KTP HLTV Recorder v1.2.2
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.1.1
- * DATE: 2026-01-10
+ * VERSION: 1.2.2
+ * DATE: 2026-01-13
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -27,10 +27,14 @@
 #include <amxmodx>
 #include <amxmisc>
 #include <curl>
+#include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.1.1"
+#define PLUGIN_VERSION "1.2.2"
 #define PLUGIN_AUTHOR  "Nein_"
+
+// Admin flag for HLTV restart command
+#define ADMIN_HLTVRESTART ADMIN_RCON
 
 // Match types (must match KTPMatchHandler enum)
 enum MatchType {
@@ -61,8 +65,41 @@ public plugin_init() {
     // Load configuration
     load_config();
 
+    // Register admin command for HLTV restart
+    register_clcmd("say .hltvrestart", "cmd_hltv_restart");
+    register_clcmd("say_team .hltvrestart", "cmd_hltv_restart");
+    register_clcmd("say /hltvrestart", "cmd_hltv_restart");
+
     server_print("[KTP HLTV] %s v%s loaded - API: %s port=%d (enabled=%d)",
         PLUGIN_NAME, PLUGIN_VERSION, g_hltvApiUrl, g_hltvPort, g_hltvEnabled);
+}
+
+public plugin_cfg() {
+    // Load shared Discord configuration
+    ktp_discord_load_config();
+
+    // Cleanup orphaned recordings from previous server session
+    // If server crashed/restarted while HLTV was recording, the recording continues
+    // but plugin state is lost. Send stoprecording to clean up any orphaned session.
+    if (g_hltvEnabled) {
+        set_task(3.0, "task_cleanup_orphaned_recording");
+    }
+}
+
+// Cleanup task - delayed to ensure HTTP module is ready
+public task_cleanup_orphaned_recording() {
+    log_amx("[KTP HLTV] Sending stoprecording to cleanup any orphaned session");
+    send_hltv_command("stoprecording");
+}
+
+public plugin_end() {
+    // Stop any active recording before plugin unloads (server restart, map change, etc.)
+    // This ensures HLTV demo is properly finalized even if match didn't end cleanly
+    if (g_isRecording && g_hltvEnabled) {
+        log_amx("[KTP HLTV] Plugin ending - stopping active recording");
+        // Note: This is synchronous call before shutdown, may or may not complete
+        send_hltv_command("stoprecording");
+    }
 }
 
 // Player joined - schedule version display
@@ -273,6 +310,135 @@ public hltv_api_callback(CURL:curl, CURLcode:code) {
     } else {
         log_amx("[KTP HLTV] HTTP API request successful");
     }
+
+    // Cleanup curl handle
+    curl_easy_cleanup(curl);
+
+    // Free headers
+    if (g_curlHeaders != SList_Empty) {
+        curl_slist_free_all(g_curlHeaders);
+        g_curlHeaders = SList_Empty;
+    }
+}
+
+// ============================================================================
+// Admin Commands
+// ============================================================================
+
+// Store ID of admin who requested restart (for callback notification)
+new g_restartRequesterId = 0;
+
+// Admin command to restart paired HLTV instance
+public cmd_hltv_restart(id) {
+    // Check admin access
+    if (!(get_user_flags(id) & ADMIN_HLTVRESTART)) {
+        client_print(id, print_chat, "[KTP HLTV] You don't have permission to restart HLTV.");
+        return PLUGIN_HANDLED;
+    }
+
+    // Check if HLTV is configured
+    if (!g_hltvApiUrl[0] || g_hltvPort <= 0) {
+        client_print(id, print_chat, "[KTP HLTV] HLTV not configured for this server.");
+        return PLUGIN_HANDLED;
+    }
+
+    // Get admin info for logging
+    new adminName[32], adminAuth[35];
+    get_user_name(id, adminName, charsmax(adminName));
+    get_user_authid(id, adminAuth, charsmax(adminAuth));
+
+    // Log the restart request
+    log_amx("[KTP HLTV] Admin %s <%s> requested HLTV restart (port %d)", adminName, adminAuth, g_hltvPort);
+
+    // Send Discord notification to audit channels
+    new description[256];
+    formatex(description, charsmax(description),
+        "**Admin:** %s (`%s`)^n**HLTV Port:** %d",
+        adminName, adminAuth, g_hltvPort);
+    ktp_discord_send_embed_audit("<:ktp:1105490705188659272> HLTV Restart", description, KTP_DISCORD_COLOR_ORANGE);
+
+    // Store requester ID for callback
+    g_restartRequesterId = id;
+
+    // Send restart request
+    client_print(id, print_chat, "[KTP HLTV] Restarting HLTV on port %d...", g_hltvPort);
+    send_hltv_restart();
+
+    return PLUGIN_HANDLED;
+}
+
+// Send restart request to HLTV API
+stock send_hltv_restart() {
+    if (!g_hltvApiUrl[0]) {
+        log_amx("[KTP HLTV] ERROR: hltv_api_url not configured");
+        return;
+    }
+
+    // Build URL: http://api/hltv/<port>/restart
+    new url[256];
+    formatex(url, charsmax(url), "%s/hltv/%d/restart", g_hltvApiUrl, g_hltvPort);
+
+    // Create cURL handle
+    new CURL:curl = curl_easy_init();
+    if (!curl) {
+        log_amx("[KTP HLTV] ERROR: curl_easy_init() failed for restart");
+        return;
+    }
+
+    // Free any previous headers
+    if (g_curlHeaders != SList_Empty) {
+        curl_slist_free_all(g_curlHeaders);
+        g_curlHeaders = SList_Empty;
+    }
+
+    // Set URL
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+
+    // Set headers
+    g_curlHeaders = curl_slist_append(SList_Empty, "Content-Type: application/json");
+
+    new authHeader[128];
+    formatex(authHeader, charsmax(authHeader), "X-Auth-Key: %s", g_hltvApiKey);
+    g_curlHeaders = curl_slist_append(g_curlHeaders, authHeader);
+
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
+
+    // POST with empty body (restart doesn't need payload)
+    curl_easy_setopt(curl, CURLOPT_POST, 1);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0);
+
+    // Set timeout (30 seconds for restart)
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30);
+
+    // Debug log
+    log_amx("[KTP HLTV] Sending restart request to %s", url);
+
+    // Perform request asynchronously
+    curl_easy_perform(curl, "hltv_restart_callback");
+}
+
+// Callback for HLTV restart response
+public hltv_restart_callback(CURL:curl, CURLcode:code) {
+    new success = (code == CURLE_OK);
+
+    if (!success) {
+        new error[128];
+        curl_easy_strerror(code, error, charsmax(error));
+        log_amx("[KTP HLTV] Restart failed: code=%d error='%s'", _:code, error);
+    } else {
+        log_amx("[KTP HLTV] HLTV restart successful (port %d)", g_hltvPort);
+    }
+
+    // Notify the admin who requested the restart
+    if (g_restartRequesterId > 0 && is_user_connected(g_restartRequesterId)) {
+        if (success) {
+            client_print(g_restartRequesterId, print_chat, "[KTP HLTV] HLTV on port %d restarted successfully.", g_hltvPort);
+        } else {
+            client_print(g_restartRequesterId, print_chat, "[KTP HLTV] HLTV restart failed! Check server logs.");
+        }
+    }
+
+    g_restartRequesterId = 0;
 
     // Cleanup curl handle
     curl_easy_cleanup(curl);

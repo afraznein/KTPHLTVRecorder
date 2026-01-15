@@ -2,6 +2,39 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.2.2] - 2026-01-13
+
+### Fixed
+- **Orphaned recording bug** - Sends `stoprecording` on plugin startup and shutdown
+  - Prevents orphaned recordings when server restarts mid-match
+  - Cleans up any in-progress recording on plugin load
+
+---
+
+## [1.2.1] - 2026-01-13
+
+### Added
+- **Discord audit notifications** for `.hltvrestart` command
+  - Posts to all configured audit channels (KTP Discord and 1.3 Discord)
+  - Shows admin name, SteamID, and HLTV port being restarted
+  - Uses `:ktp:` emoji in embed title
+
+### Technical
+- Added `ktp_discord.inc` integration for Discord embeds
+- Added `plugin_cfg()` to load shared Discord configuration
+
+## [1.2.0] - 2026-01-13
+
+### Added
+- **`.hltvrestart` admin command** - Restart paired HLTV instance from game server
+  - Requires ADMIN_RCON access level
+  - Sends HTTP POST to `/hltv/<port>/restart` endpoint
+  - Notifies admin of success/failure via chat
+
+### Technical
+- Updated HLTV API (hltv-api.py) with `/hltv/<port>/restart` endpoint
+- Restart uses `systemctl restart hltv@<port>` on data server
+
 ## [1.1.1] - 2026-01-10
 
 ### Added
