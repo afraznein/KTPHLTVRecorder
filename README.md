@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.2.2** - Automatic HLTV demo recording for KTP competitive matches.
+**Version 1.3.0** - Automatic HLTV demo recording for KTP competitive matches.
 
 ## Overview
 
@@ -47,18 +47,19 @@ Each game server needs its own config with its paired HLTV port:
 
 ## Demo Naming
 
-Format: `<matchtype>_<matchid>.dem`
+Format: `<matchtype>_<matchid>_<half>.dem`
 
-The matchId already contains the map name (e.g., `KTP-1735052400-dod_anzio`), so it's not duplicated.
+Each half gets its own demo file. The matchId already contains the map name (e.g., `KTP-1735052400-dod_anzio`).
 
-| Match Type | Example Demo Name |
-|------------|-------------------|
-| `.ktp`     | `ktp_KTP-1735052400-dod_anzio.dem` |
-| `.scrim`   | `scrim_KTP-1735052400-dod_flash.dem` |
-| `.draft`   | `draft_KTP-1735052400-dod_avalanche.dem` |
-| `.12man`   | `12man_KTP-1735052400-dod_caen.dem` |
-| `.ktpOT`   | `ktpOT_KTP-1735052400-dod_anzio.dem` |
-| `.draftOT` | `draftOT_KTP-1735052400-dod_avalanche.dem` |
+| Match Type | Half | Example Demo Name |
+|------------|------|-------------------|
+| `.ktp`     | 1st  | `ktp_KTP-1735052400-dod_anzio_h1.dem` |
+| `.ktp`     | 2nd  | `ktp_KTP-1735052400-dod_anzio_h2.dem` |
+| `.scrim`   | 1st  | `scrim_KTP-1735052400-dod_flash_h1.dem` |
+| `.draft`   | 1st  | `draft_KTP-1735052400-dod_avalanche_h1.dem` |
+| `.12man`   | 1st  | `12man_KTP-1735052400-dod_caen_h1.dem` |
+| `.ktpOT`   | OT1  | `ktpOT_KTP-1735052400-dod_anzio_ot1.dem` |
+| `.ktpOT`   | OT2  | `ktpOT_KTP-1735052400-dod_anzio_ot2.dem` |
 
 ## How It Works
 
@@ -83,6 +84,11 @@ Requires WSL with KTPAMXX compiler:
 ```
 
 ## Version History
+
+### v1.3.0 (2026-01-22)
+- 🔧 **FIXED: Second half recording** - Each half now gets its own demo file
+- ✅ **ADDED: Half suffix in demo names** - `_h1`, `_h2`, `_ot1`, `_ot2`, etc.
+- 🗑️ **REMOVED: "Already recording" skip logic** - Each half starts fresh recording
 
 ### v1.2.2 (2026-01-13)
 - 🔧 **FIXED: Orphaned recording bug** - Sends stoprecording on plugin startup/shutdown

@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.2.2
+/* KTP HLTV Recorder v1.3.0
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.2.2
- * DATE: 2026-01-13
+ * VERSION: 1.3.0
+ * DATE: 2026-01-22
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -20,8 +20,21 @@
  *   hltv_port = 27020
  *
  * DEMO NAMING:
- *   Format: <matchtype>_<matchid>.dem
- *   Example: ktp_KTP-1735052400-dod_anzio.dem
+ *   Format: <matchtype>_<matchid>_<half>.dem
+ *   Examples:
+ *     ktp_KTP-1735052400-dod_anzio_h1.dem (first half)
+ *     ktp_KTP-1735052400-dod_anzio_h2.dem (second half)
+ *     ktp_KTP-1735052400-dod_anzio_ot1.dem (overtime round 1)
+ *
+ * CHANGELOG:
+ *   v1.3.0 (2026-01-22):
+ *     - FIXED: Second half recording now works - each half gets separate demo file
+ *     - Demo names now include half suffix (_h1, _h2, _ot1, _ot2, etc.)
+ *     - Removed "already recording" skip logic - each half starts fresh recording
+ *   v1.2.2 (2026-01-13):
+ *     - Fixed orphaned recording bug - sends stoprecording on plugin startup/shutdown
+ *   v1.2.1 (2026-01-13):
+ *     - Admin .hltvrestart command with Discord audit notification
  */
 
 #include <amxmodx>
@@ -30,7 +43,7 @@
 #include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.2.2"
+#define PLUGIN_VERSION "1.3.0"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -125,10 +138,14 @@ public fn_version_display(id) {
 // half: 1=1st half, 2=2nd half, 101+=OT round (101, 102, 103...)
 public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) {
     new halfStr[16];
+    new halfSuffix[8];
+
     if (half <= 2) {
         formatex(halfStr, charsmax(halfStr), "half=%d", half);
+        formatex(halfSuffix, charsmax(halfSuffix), "h%d", half);
     } else {
         formatex(halfStr, charsmax(halfStr), "OT%d", half - 100);
+        formatex(halfSuffix, charsmax(halfSuffix), "ot%d", half - 100);
     }
     log_amx("[KTP HLTV] ktp_match_start received: matchId=%s map=%s type=%d %s enabled=%d", matchId, map, matchType, halfStr, g_hltvEnabled);
 
@@ -137,11 +154,8 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) 
         return;
     }
 
-    // Check if already recording the same match (idempotent - HLTV maintains connection through map changes)
-    if (g_isRecording && equal(g_currentMatchId, matchId)) {
-        log_amx("[KTP HLTV] Already recording match %s - continuing (%s)", matchId, halfStr);
-        return;
-    }
+    // Each half gets its own recording - no "already recording" skip
+    // Plugin state is lost during map changes, so we start fresh each half
 
     // Build demo name based on match type
     new demoName[128];
@@ -157,8 +171,8 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) 
         default:                     copy(typeStr, charsmax(typeStr), "match");
     }
 
-    // Demo name format: type_matchid (matchId already contains map)
-    formatex(demoName, charsmax(demoName), "%s_%s", typeStr, matchId);
+    // Demo name format: type_matchid_half (e.g., ktp_KTP-123456-dod_anzio_h1)
+    formatex(demoName, charsmax(demoName), "%s_%s_%s", typeStr, matchId, halfSuffix);
 
     // Store match ID for logging
     copy(g_currentMatchId, charsmax(g_currentMatchId), matchId);

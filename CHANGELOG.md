@@ -2,6 +2,24 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.3.0] - 2026-01-22
+
+### Fixed
+- **Second half recording** - Each half now gets its own separate demo file
+  - Previously, second half wouldn't record due to "already recording" skip logic
+  - Plugin state is lost during map changes, so each half starts fresh
+
+### Added
+- **Half suffix in demo names** - `_h1`, `_h2`, `_ot1`, `_ot2`, etc.
+  - Example: `ktp_KTP-1735052400-dod_anzio_h1.dem` (first half)
+  - Example: `ktp_KTP-1735052400-dod_anzio_h2.dem` (second half)
+  - Example: `ktp_KTP-1735052400-dod_anzio_ot1.dem` (overtime round 1)
+
+### Removed
+- **"Already recording" skip logic** - No longer tries to continue recording across halves
+
+---
+
 ## [1.2.2] - 2026-01-13
 
 ### Fixed
