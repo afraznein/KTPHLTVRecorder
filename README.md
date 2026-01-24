@@ -12,12 +12,14 @@ KTPHLTVRecorder hooks into [KTPMatchHandler](https://github.com/afraznein/KTPMat
 - 1:1 game server to HLTV pairing
 - Descriptive demo naming: `<type>_<matchid>.dem` (matchId includes map)
 - HTTP API communication with HLTV control service
-- **Admin HLTV restart command** - `.hltvrestart` to restart paired HLTV instance
+- **Admin HLTV restart command** - `.hltvrestart` or `/hltvrestart` to restart paired HLTV instance
+- **Player version display** - Shows plugin version to players on connect (5 second delay)
 
 ## Requirements
 
-- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.4+
+- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.1+ (provides `ktp_match_start`/`ktp_match_end` forwards)
 - AMX Mod X Curl module
+- [ktp_discord.inc](https://github.com/afraznein/KTPMatchHandler) - Shared Discord library (for audit notifications)
 - HLTV API service running on data server
 - Paired HLTV instance per game server
 
