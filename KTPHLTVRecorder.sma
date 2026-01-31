@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.3.0
+/* KTP HLTV Recorder v1.4.0
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.3.0
- * DATE: 2026-01-22
+ * VERSION: 1.4.0
+ * DATE: 2026-01-31
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -27,6 +27,10 @@
  *     ktp_KTP-1735052400-dod_anzio_ot1.dem (overtime round 1)
  *
  * CHANGELOG:
+ *   v1.4.0 (2026-01-31):
+ *     - Added pre-match HLTV health check before starting recording
+ *     - Added Discord + chat alerts when HLTV API fails
+ *     - Added callback failure detection with notifications
  *   v1.3.0 (2026-01-22):
  *     - FIXED: Second half recording now works - each half gets separate demo file
  *     - Demo names now include half suffix (_h1, _h2, _ot1, _ot2, etc.)
@@ -43,7 +47,7 @@
 #include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.3.0"
+#define PLUGIN_VERSION "1.4.0"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -68,6 +72,10 @@ new g_hltvPort = 27020;
 // State
 new bool:g_isRecording = false;
 new g_currentMatchId[64];
+new bool:g_hltvHealthy = true;  // Assume healthy until proven otherwise
+new g_pendingMatchId[64];       // Match ID waiting for health check
+new g_pendingDemoName[128];     // Demo name waiting for health check
+new g_pendingHalf;              // Half number waiting for health check
 
 // Curl state
 new curl_slist:g_curlHeaders = SList_Empty;
@@ -174,21 +182,140 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) 
     // Demo name format: type_matchid_half (e.g., ktp_KTP-123456-dod_anzio_h1)
     formatex(demoName, charsmax(demoName), "%s_%s_%s", typeStr, matchId, halfSuffix);
 
-    // Store match ID for logging
+    // Store pending info for health check callback
+    copy(g_pendingMatchId, charsmax(g_pendingMatchId), matchId);
+    copy(g_pendingDemoName, charsmax(g_pendingDemoName), demoName);
+    g_pendingHalf = half;
     copy(g_currentMatchId, charsmax(g_currentMatchId), matchId);
+
+    // First, do a health check on HLTV API before starting recording
+    log_amx("[KTP HLTV] Checking HLTV health before recording...");
+    send_hltv_health_check();
+}
+
+// Send health check to HLTV API
+stock send_hltv_health_check() {
+    if (!g_hltvApiUrl[0]) {
+        log_amx("[KTP HLTV] ERROR: hltv_api_url not configured");
+        alert_hltv_failure("HLTV API URL not configured");
+        return;
+    }
+
+    // Build URL: http://api/health
+    new url[256];
+    formatex(url, charsmax(url), "%s/health", g_hltvApiUrl);
+
+    // Create cURL handle
+    new CURL:curl = curl_easy_init();
+    if (!curl) {
+        log_amx("[KTP HLTV] ERROR: curl_easy_init() failed for health check");
+        alert_hltv_failure("Failed to initialize HTTP client");
+        return;
+    }
+
+    // Set URL
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+
+    // GET request (no POST data)
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
+
+    // Set timeout (3 seconds for health check)
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3);
+
+    // Debug log
+    log_amx("[KTP HLTV] Sending health check to %s", url);
+
+    // Perform request asynchronously
+    curl_easy_perform(curl, "hltv_health_callback");
+}
+
+// Callback for HLTV health check
+public hltv_health_callback(CURL:curl, CURLcode:code) {
+    curl_easy_cleanup(curl);
+
+    if (code != CURLE_OK) {
+        new error[128];
+        curl_easy_strerror(code, error, charsmax(error));
+        log_amx("[KTP HLTV] Health check FAILED: code=%d error='%s'", _:code, error);
+
+        g_hltvHealthy = false;
+
+        // Alert and attempt recovery
+        new msg[256];
+        formatex(msg, charsmax(msg), "HLTV API not responding: %s. Attempting restart...", error);
+        alert_hltv_failure(msg);
+
+        // Try to restart HLTV instance (may help if instance is stuck)
+        log_amx("[KTP HLTV] Attempting HLTV instance restart as recovery...");
+        send_hltv_restart();
+
+        // Still try to start recording after a delay (HLTV might recover)
+        set_task(5.0, "task_delayed_recording_start");
+        return;
+    }
+
+    // Health check passed
+    g_hltvHealthy = true;
+    log_amx("[KTP HLTV] Health check passed, starting recording");
+
+    // Now start the actual recording
+    start_recording();
+}
+
+// Delayed recording attempt after HLTV recovery
+public task_delayed_recording_start() {
+    if (g_pendingDemoName[0]) {
+        log_amx("[KTP HLTV] Attempting delayed recording start after recovery attempt");
+        start_recording();
+    }
+}
+
+// Actually start the recording
+stock start_recording() {
+    if (!g_pendingDemoName[0]) {
+        log_amx("[KTP HLTV] ERROR: No pending demo name for recording");
+        return;
+    }
+
+    new halfStr[16];
+    if (g_pendingHalf <= 2) {
+        formatex(halfStr, charsmax(halfStr), "half=%d", g_pendingHalf);
+    } else {
+        formatex(halfStr, charsmax(halfStr), "OT%d", g_pendingHalf - 100);
+    }
 
     // Send record command to HLTV via HTTP API
     new command[256];
-    formatex(command, charsmax(command), "record %s", demoName);
+    formatex(command, charsmax(command), "record %s", g_pendingDemoName);
 
     if (send_hltv_command(command)) {
         g_isRecording = true;
-        server_print("[KTP HLTV] Started recording: %s.dem (%s)", demoName, halfStr);
-        log_amx("[KTP HLTV] Recording started: %s.dem (match_id=%s %s)", demoName, matchId, halfStr);
+        server_print("[KTP HLTV] Started recording: %s.dem (%s)", g_pendingDemoName, halfStr);
+        log_amx("[KTP HLTV] Recording started: %s.dem (match_id=%s %s)", g_pendingDemoName, g_pendingMatchId, halfStr);
     } else {
         server_print("[KTP HLTV] Failed to start recording!");
-        log_amx("[KTP HLTV] ERROR: Failed to start recording (match_id=%s %s)", matchId, halfStr);
+        log_amx("[KTP HLTV] ERROR: Failed to start recording (match_id=%s %s)", g_pendingMatchId, halfStr);
+        alert_hltv_failure("Failed to send record command");
     }
+
+    // Clear pending state
+    g_pendingDemoName[0] = EOS;
+    g_pendingMatchId[0] = EOS;
+}
+
+// Alert about HLTV failure via Discord and chat
+stock alert_hltv_failure(const reason[]) {
+    // Get server hostname
+    new hostname[64];
+    get_cvar_string("hostname", hostname, charsmax(hostname));
+
+    // Chat alert to all players
+    client_print(0, print_chat, "[KTP HLTV] WARNING: HLTV recording may not work - %s", reason);
+
+    // Discord alert with hostname
+    new desc[384];
+    formatex(desc, charsmax(desc), "**Server:** %s^n**HLTV Port:** %d^n**Error:** %s", hostname, g_hltvPort, reason);
+    ktp_discord_send_embed_audit("<:ktp:1105490705188659272> HLTV Recording Issue", desc, KTP_DISCORD_COLOR_RED);
 }
 
 // Forward from KTPMatchHandler - match ended
@@ -321,6 +448,14 @@ public hltv_api_callback(CURL:curl, CURLcode:code) {
         new error[128];
         curl_easy_strerror(code, error, charsmax(error));
         log_amx("[KTP HLTV] HTTP API error: code=%d error='%s'", _:code, error);
+
+        // Alert on recording command failure
+        new msg[256];
+        formatex(msg, charsmax(msg), "Recording command failed: %s", error);
+        alert_hltv_failure(msg);
+
+        // Mark as not recording since command failed
+        g_isRecording = false;
     } else {
         log_amx("[KTP HLTV] HTTP API request successful");
     }

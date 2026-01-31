@@ -2,6 +2,30 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.4.0] - 2026-01-31
+
+### Added
+- **Pre-match HLTV health check** - Verifies HLTV API is responding before starting recording
+  - GET request to `/health` endpoint with 3 second timeout
+  - If health check fails, attempts automatic HLTV restart as recovery
+  - Falls back to delayed recording attempt after recovery
+- **Discord + chat alerts** - Notifies when HLTV recording may not work
+  - Posts to audit Discord channels with server hostname and error details
+  - In-game chat warning to all connected players
+  - Uses red embed color for failure alerts
+- **Callback failure detection** - Detects when recording commands fail
+  - `hltv_api_callback` now alerts on curl errors
+  - Marks recording as failed so state stays accurate
+
+### Technical
+- Added `g_hltvHealthy` state tracking
+- Added `g_pendingMatchId`, `g_pendingDemoName`, `g_pendingHalf` for deferred recording
+- Added `alert_hltv_failure()` for unified error notification
+- Added `send_hltv_health_check()` and `hltv_health_callback()`
+- Added `task_delayed_recording_start()` for post-recovery recording attempt
+
+---
+
 ## [1.3.0] - 2026-01-22
 
 ### Fixed

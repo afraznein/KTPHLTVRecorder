@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.3.0** - Automatic HLTV demo recording for KTP competitive matches.
+**Version 1.4.0** - Automatic HLTV demo recording for KTP competitive matches.
 
 ## Overview
 
@@ -10,8 +10,10 @@ KTPHLTVRecorder hooks into [KTPMatchHandler](https://github.com/afraznein/KTPMat
 
 - Automatic recording for all match types (`.ktp`, `.scrim`, `.draft`, `.12man`, `.ktpOT`, `.draftOT`)
 - 1:1 game server to HLTV pairing
-- Descriptive demo naming: `<type>_<matchid>.dem` (matchId includes map)
+- Descriptive demo naming: `<type>_<matchid>_<half>.dem` (matchId includes map)
 - HTTP API communication with HLTV control service
+- **Pre-match HLTV health check** - Verifies HLTV API before recording, auto-recovery on failure
+- **Discord + chat alerts** - Notifies admins when HLTV recording fails
 - **Admin HLTV restart command** - `.hltvrestart` or `/hltvrestart` to restart paired HLTV instance
 - **Player version display** - Shows plugin version to players on connect (5 second delay)
 
@@ -86,6 +88,12 @@ Requires WSL with KTPAMXX compiler:
 ```
 
 ## Version History
+
+### v1.4.0 (2026-01-31)
+- ✅ **ADDED: Pre-match HLTV health check** - Verifies API before recording
+- ✅ **ADDED: Discord + chat alerts** - Notifies when HLTV recording fails
+- ✅ **ADDED: Auto-recovery** - Attempts HLTV restart if health check fails
+- ✅ **ADDED: Callback failure detection** - Proper error handling for API failures
 
 ### v1.3.0 (2026-01-22)
 - 🔧 **FIXED: Second half recording** - Each half now gets its own demo file
