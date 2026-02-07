@@ -4,18 +4,18 @@
 ; Enable/disable HLTV recording (1 = enabled, 0 = disabled)
 hltv_enabled = 1
 
-; HLTV server IP address
-; This is the paired HLTV instance for this game server
-hltv_ip = 74.91.112.242
+; HLTV API base URL (data server HTTP API)
+hltv_api_url = http://74.91.112.242:8087
+
+; HLTV API authentication key
+; Must match the key configured in hltv-api.py on the data server
+hltv_api_key = your-api-key-here
 
 ; HLTV server port
 ; Each game server should have a unique paired HLTV port
 ; Example mapping:
 ;   Game Server Atlanta 1 (27015) -> HLTV 27020
 ;   Game Server Atlanta 2 (27016) -> HLTV 27021
+;   Game Server Atlanta 3 (27017) -> HLTV 27022
 ;   etc.
 hltv_port = 27020
-
-; HLTV RCON/admin password
-; Must match the adminpassword in the HLTV config
-hltv_rcon = ktpadmin
