@@ -2,6 +2,40 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.5.1] - 2026-02-18
+
+### Fixed
+- **Segfault on half 2 start** - v1.5.0's new `stoprecording` + health check + `record` sequence fired three overlapping async curl requests. The shared `g_curlHeaders` slist was freed and recreated between requests, causing use-after-free when earlier curl handles still referenced the freed memory.
+
+### Changed
+- **Curl headers now created once at init** - `init_curl_headers()` builds the slist once after config loads. All requests share the same persistent headers. No per-request free/create cycle.
+
+---
+
+## [1.5.0] - 2026-02-18
+
+### Fixed
+- **HLTV demo cutoff (~47 seconds lost per half)** - Root cause: `stoprecording` was sent during map changes (via `plugin_end()` and orphan cleanup in `plugin_cfg()`), which immediately killed the HLTV delay buffer (~60s of unwritten content). With ~13s of intermission before the map change, this produced the ~47-second cutoff.
+
+### Changed
+- **Removed `stoprecording` from `plugin_end()`** - HLTV now keeps recording through map changes, allowing the delay buffer to drain naturally
+- **Removed orphan cleanup `stoprecording` from `plugin_cfg()`** - Replaced with localinfo-based pending stop check
+- **Half transitions now stop previous recording** - `ktp_match_start(half > 1)` sends `stoprecording` before starting new recording (safe because buffer has drained during the 60-120+ second gap between halves)
+- **Match end uses delayed `stoprecording`** - Waits `hltv_stop_delay` seconds (default 75) after match end to allow buffer to drain before closing the demo
+
+### Added
+- **`hltv_stop_delay` config option** - Configurable delay (10-300 seconds, default 75) before sending `stoprecording` after match end
+- **`_ktp_hltv_pending_stop` localinfo** - Persists pending stop state across map changes as safety net
+- **`g_matchActive` state tracking** - Tracks whether a match is in progress
+
+### Removed
+- **`g_isRecording` state variable** - No longer needed; recording lifecycle is managed by match start/end events and half transitions
+
+### Trade-offs
+- Half 1 demo will include ~60 seconds of half 2 warmup content at the end (between HLTV reconnect and `stoprecording` at half 2 start). This is acceptable — all actual match gameplay is captured completely.
+
+---
+
 ## [1.4.0] - 2026-01-31
 
 ### Added

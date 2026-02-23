@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.4.0
+/* KTP HLTV Recorder v1.5.1
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.4.0
- * DATE: 2026-01-31
+ * VERSION: 1.5.0
+ * DATE: 2026-02-18
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -18,6 +18,7 @@
  *   hltv_api_url = http://74.91.112.242:8087
  *   hltv_api_key = KTPVPS2026
  *   hltv_port = 27020
+ *   hltv_stop_delay = 75
  *
  * DEMO NAMING:
  *   Format: <matchtype>_<matchid>_<half>.dem
@@ -26,7 +27,26 @@
  *     ktp_KTP-1735052400-dod_anzio_h2.dem (second half)
  *     ktp_KTP-1735052400-dod_anzio_ot1.dem (overtime round 1)
  *
+ * RECORDING LIFECYCLE (v1.5.0):
+ *   Half 1 starts  -> record <name>_h1
+ *   Half 1 ends    -> map changes -> HLTV keeps recording, delay buffer drains
+ *   Half 2 starts  -> stoprecording (safe, buffer drained) -> record <name>_h2
+ *   Match ends     -> delayed stoprecording after hltv_stop_delay seconds
+ *
+ *   This ensures the HLTV delay buffer (~60s) is never truncated.
+ *   Previous versions sent stoprecording on plugin_end/plugin_cfg which
+ *   immediately killed the buffer, losing ~47 seconds of gameplay.
+ *
  * CHANGELOG:
+ *   v1.5.1 (2026-02-18):
+ *     - Fixed segfault on half 2 start caused by shared g_curlHeaders use-after-free
+ *     - Curl headers now created once at init and reused (never freed per-request)
+ *   v1.5.0 (2026-02-18):
+ *     - Fixed HLTV demo cutoff (~47 seconds lost per half)
+ *     - Removed premature stoprecording from plugin_end() and plugin_cfg()
+ *     - Added delayed stoprecording on match end (configurable hltv_stop_delay)
+ *     - Half transitions now stop previous recording before starting new one
+ *     - Added localinfo persistence for pending stop across map changes
  *   v1.4.0 (2026-01-31):
  *     - Added pre-match HLTV health check before starting recording
  *     - Added Discord + chat alerts when HLTV API fails
@@ -47,11 +67,14 @@
 #include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.4.0"
+#define PLUGIN_VERSION "1.5.1"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
 #define ADMIN_HLTVRESTART ADMIN_RCON
+
+// Task IDs
+#define TASK_DELAYED_STOP 5500
 
 // Match types (must match KTPMatchHandler enum)
 enum MatchType {
@@ -68,16 +91,19 @@ new g_hltvEnabled = 0;
 new g_hltvApiUrl[128];
 new g_hltvApiKey[64];
 new g_hltvPort = 27020;
+new g_hltvStopDelay = 75;  // seconds to wait before stoprecording at match end
 
 // State
-new bool:g_isRecording = false;
 new g_currentMatchId[64];
-new bool:g_hltvHealthy = true;  // Assume healthy until proven otherwise
-new g_pendingMatchId[64];       // Match ID waiting for health check
-new g_pendingDemoName[128];     // Demo name waiting for health check
-new g_pendingHalf;              // Half number waiting for health check
+new bool:g_matchActive = false;  // true between match_start and match_end
+new g_pendingMatchId[64];        // Match ID waiting for health check
+new g_pendingDemoName[128];      // Demo name waiting for health check
+new g_pendingHalf;               // Half number waiting for health check
 
-// Curl state
+// Curl state - headers are created once and reused for all requests.
+// IMPORTANT: Do NOT free/recreate these per-request. Multiple async curl handles
+// reference this slist concurrently. Freeing while a request is in flight causes
+// use-after-free segfaults. The headers never change (same Content-Type + API key).
 new curl_slist:g_curlHeaders = SList_Empty;
 
 public plugin_init() {
@@ -86,40 +112,69 @@ public plugin_init() {
     // Load configuration
     load_config();
 
+    // Build persistent curl headers (reused for all requests)
+    init_curl_headers();
+
     // Register admin command for HLTV restart
     register_clcmd("say .hltvrestart", "cmd_hltv_restart");
     register_clcmd("say_team .hltvrestart", "cmd_hltv_restart");
     register_clcmd("say /hltvrestart", "cmd_hltv_restart");
 
-    server_print("[KTP HLTV] %s v%s loaded - API: %s port=%d (enabled=%d)",
-        PLUGIN_NAME, PLUGIN_VERSION, g_hltvApiUrl, g_hltvPort, g_hltvEnabled);
+    server_print("[KTP HLTV] %s v%s loaded - API: %s port=%d (enabled=%d, stop_delay=%d)",
+        PLUGIN_NAME, PLUGIN_VERSION, g_hltvApiUrl, g_hltvPort, g_hltvEnabled, g_hltvStopDelay);
+}
+
+// Create persistent header list - called once after config is loaded
+stock init_curl_headers() {
+    if (g_curlHeaders != SList_Empty) {
+        curl_slist_free_all(g_curlHeaders);
+        g_curlHeaders = SList_Empty;
+    }
+
+    g_curlHeaders = curl_slist_append(SList_Empty, "Content-Type: application/json");
+
+    new authHeader[128];
+    formatex(authHeader, charsmax(authHeader), "X-Auth-Key: %s", g_hltvApiKey);
+    g_curlHeaders = curl_slist_append(g_curlHeaders, authHeader);
 }
 
 public plugin_cfg() {
     // Load shared Discord configuration
     ktp_discord_load_config();
 
-    // Cleanup orphaned recordings from previous server session
-    // If server crashed/restarted while HLTV was recording, the recording continues
-    // but plugin state is lost. Send stoprecording to clean up any orphaned session.
+    // Check if a delayed stop was pending from before the map change
+    // (match ended, delayed stop task was scheduled, but map changed before it fired)
     if (g_hltvEnabled) {
-        set_task(3.0, "task_cleanup_orphaned_recording");
+        new pendingStop[8];
+        get_localinfo("_ktp_hltv_pending_stop", pendingStop, charsmax(pendingStop));
+
+        if (equal(pendingStop, "1")) {
+            // Check if there's an active match — if so, ktp_match_start will handle it
+            new matchId[64];
+            get_localinfo("_ktp_mid", matchId, charsmax(matchId));
+
+            if (!matchId[0]) {
+                // No active match — safe to send stoprecording now
+                // The delay buffer has drained during the map change
+                log_amx("[KTP HLTV] Pending stop detected (no active match) - sending stoprecording");
+                send_hltv_command("stoprecording");
+                set_localinfo("_ktp_hltv_pending_stop", "");
+            } else {
+                log_amx("[KTP HLTV] Pending stop detected but match active (mid=%s) - deferring to match_start", matchId);
+            }
+        }
     }
 }
 
-// Cleanup task - delayed to ensure HTTP module is ready
-public task_cleanup_orphaned_recording() {
-    log_amx("[KTP HLTV] Sending stoprecording to cleanup any orphaned session");
-    send_hltv_command("stoprecording");
-}
-
 public plugin_end() {
-    // Stop any active recording before plugin unloads (server restart, map change, etc.)
-    // This ensures HLTV demo is properly finalized even if match didn't end cleanly
-    if (g_isRecording && g_hltvEnabled) {
-        log_amx("[KTP HLTV] Plugin ending - stopping active recording");
-        // Note: This is synchronous call before shutdown, may or may not complete
-        send_hltv_command("stoprecording");
+    // v1.5.0: Do NOT send stoprecording here.
+    // HLTV has a delay buffer (~60 seconds). Sending stoprecording during a map change
+    // immediately kills the buffer, losing ~47 seconds of gameplay content.
+    // Instead, we let HLTV keep recording through map changes and stop it at the
+    // appropriate time (next half start, or delayed stop after match end).
+
+    if (g_matchActive && g_hltvEnabled) {
+        log_amx("[KTP HLTV] Plugin ending during active match - HLTV will keep recording (buffer drain)");
     }
 }
 
@@ -162,8 +217,22 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) 
         return;
     }
 
-    // Each half gets its own recording - no "already recording" skip
-    // Plugin state is lost during map changes, so we start fresh each half
+    // Cancel any pending delayed stop task (e.g., back-to-back matches)
+    remove_task(TASK_DELAYED_STOP);
+
+    // Clear pending stop flag
+    set_localinfo("_ktp_hltv_pending_stop", "");
+
+    // For half > 1 (2nd half, OT rounds): stop previous recording first.
+    // By the time ktp_match_start fires for half 2 (60-120+ seconds after map change),
+    // the HLTV delay buffer from the previous half has fully drained, so stoprecording
+    // is safe — all previous content has been written to the demo file.
+    if (half > 1) {
+        log_amx("[KTP HLTV] Stopping previous half recording before starting %s", halfStr);
+        send_hltv_command("stoprecording");
+    }
+
+    g_matchActive = true;
 
     // Build demo name based on match type
     new demoName[128];
@@ -238,8 +307,6 @@ public hltv_health_callback(CURL:curl, CURLcode:code) {
         curl_easy_strerror(code, error, charsmax(error));
         log_amx("[KTP HLTV] Health check FAILED: code=%d error='%s'", _:code, error);
 
-        g_hltvHealthy = false;
-
         // Alert and attempt recovery
         new msg[256];
         formatex(msg, charsmax(msg), "HLTV API not responding: %s. Attempting restart...", error);
@@ -255,7 +322,6 @@ public hltv_health_callback(CURL:curl, CURLcode:code) {
     }
 
     // Health check passed
-    g_hltvHealthy = true;
     log_amx("[KTP HLTV] Health check passed, starting recording");
 
     // Now start the actual recording
@@ -289,7 +355,6 @@ stock start_recording() {
     formatex(command, charsmax(command), "record %s", g_pendingDemoName);
 
     if (send_hltv_command(command)) {
-        g_isRecording = true;
         server_print("[KTP HLTV] Started recording: %s.dem (%s)", g_pendingDemoName, halfStr);
         log_amx("[KTP HLTV] Recording started: %s.dem (match_id=%s %s)", g_pendingDemoName, g_pendingMatchId, halfStr);
     } else {
@@ -320,19 +385,29 @@ stock alert_hltv_failure(const reason[]) {
 
 // Forward from KTPMatchHandler - match ended
 public ktp_match_end(const matchId[], const map[], MatchType:matchType, team1Score, team2Score) {
-    if (!g_hltvEnabled || !g_isRecording) return;
+    if (!g_hltvEnabled) return;
 
-    // Send stoprecording command to HLTV
-    if (send_hltv_command("stoprecording")) {
-        g_isRecording = false;
-        server_print("[KTP HLTV] Stopped recording (match_id=%s, score=%d-%d)", matchId, team1Score, team2Score);
-        log_amx("[KTP HLTV] Recording stopped: match_id=%s score=%d-%d", matchId, team1Score, team2Score);
-    } else {
-        server_print("[KTP HLTV] Failed to stop recording!");
-        log_amx("[KTP HLTV] ERROR: Failed to stop recording (match_id=%s)", matchId);
-    }
+    g_matchActive = false;
+
+    // Set pending stop flag as safety net (persists across map changes via localinfo)
+    set_localinfo("_ktp_hltv_pending_stop", "1");
+
+    // Schedule delayed stoprecording to allow HLTV delay buffer to drain
+    // The buffer is ~60 seconds; we wait g_hltvStopDelay (default 75s) to be safe
+    remove_task(TASK_DELAYED_STOP);  // Cancel any existing delayed stop
+    set_task(float(g_hltvStopDelay), "task_delayed_match_stop", TASK_DELAYED_STOP);
+
+    server_print("[KTP HLTV] Match ended (match_id=%s, score=%d-%d) - stoprecording scheduled in %ds", matchId, team1Score, team2Score, g_hltvStopDelay);
+    log_amx("[KTP HLTV] Match ended: match_id=%s score=%d-%d - delayed stop in %ds", matchId, team1Score, team2Score, g_hltvStopDelay);
 
     g_currentMatchId[0] = EOS;
+}
+
+// Delayed stop task - fires g_hltvStopDelay seconds after match end
+public task_delayed_match_stop() {
+    log_amx("[KTP HLTV] Delayed stop firing - sending stoprecording (buffer drain complete)");
+    send_hltv_command("stoprecording");
+    set_localinfo("_ktp_hltv_pending_stop", "");
 }
 
 // Load configuration from hltv_recorder.ini
@@ -380,11 +455,15 @@ stock load_config() {
             copy(g_hltvApiKey, charsmax(g_hltvApiKey), value);
         } else if (equali(key, "hltv_port")) {
             g_hltvPort = str_to_num(value);
+        } else if (equali(key, "hltv_stop_delay")) {
+            g_hltvStopDelay = str_to_num(value);
+            if (g_hltvStopDelay < 10) g_hltvStopDelay = 10;  // minimum 10 seconds
+            if (g_hltvStopDelay > 300) g_hltvStopDelay = 300;  // maximum 5 minutes
         }
     }
 
     fclose(file);
-    server_print("[KTP HLTV] Config loaded: api=%s port=%d enabled=%d", g_hltvApiUrl, g_hltvPort, g_hltvEnabled);
+    server_print("[KTP HLTV] Config loaded: api=%s port=%d enabled=%d stop_delay=%d", g_hltvApiUrl, g_hltvPort, g_hltvEnabled, g_hltvStopDelay);
 }
 
 // Send command to HLTV server via HTTP API
@@ -409,22 +488,10 @@ stock bool:send_hltv_command(const command[]) {
         return false;
     }
 
-    // Free any previous headers
-    if (g_curlHeaders != SList_Empty) {
-        curl_slist_free_all(g_curlHeaders);
-        g_curlHeaders = SList_Empty;
-    }
-
     // Set URL
     curl_easy_setopt(curl, CURLOPT_URL, url);
 
-    // Set headers
-    g_curlHeaders = curl_slist_append(SList_Empty, "Content-Type: application/json");
-
-    new authHeader[128];
-    formatex(authHeader, charsmax(authHeader), "X-Auth-Key: %s", g_hltvApiKey);
-    g_curlHeaders = curl_slist_append(g_curlHeaders, authHeader);
-
+    // Set persistent headers (created once in init_curl_headers, never freed per-request)
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
 
     // Set POST data
@@ -453,21 +520,12 @@ public hltv_api_callback(CURL:curl, CURLcode:code) {
         new msg[256];
         formatex(msg, charsmax(msg), "Recording command failed: %s", error);
         alert_hltv_failure(msg);
-
-        // Mark as not recording since command failed
-        g_isRecording = false;
     } else {
         log_amx("[KTP HLTV] HTTP API request successful");
     }
 
-    // Cleanup curl handle
+    // Cleanup curl handle only - headers are persistent (shared across requests)
     curl_easy_cleanup(curl);
-
-    // Free headers
-    if (g_curlHeaders != SList_Empty) {
-        curl_slist_free_all(g_curlHeaders);
-        g_curlHeaders = SList_Empty;
-    }
 }
 
 // ============================================================================
@@ -534,22 +592,10 @@ stock send_hltv_restart() {
         return;
     }
 
-    // Free any previous headers
-    if (g_curlHeaders != SList_Empty) {
-        curl_slist_free_all(g_curlHeaders);
-        g_curlHeaders = SList_Empty;
-    }
-
     // Set URL
     curl_easy_setopt(curl, CURLOPT_URL, url);
 
-    // Set headers
-    g_curlHeaders = curl_slist_append(SList_Empty, "Content-Type: application/json");
-
-    new authHeader[128];
-    formatex(authHeader, charsmax(authHeader), "X-Auth-Key: %s", g_hltvApiKey);
-    g_curlHeaders = curl_slist_append(g_curlHeaders, authHeader);
-
+    // Set persistent headers (created once in init_curl_headers, never freed per-request)
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
 
     // POST with empty body (restart doesn't need payload)
@@ -589,12 +635,6 @@ public hltv_restart_callback(CURL:curl, CURLcode:code) {
 
     g_restartRequesterId = 0;
 
-    // Cleanup curl handle
+    // Cleanup curl handle only - headers are persistent (shared across requests)
     curl_easy_cleanup(curl);
-
-    // Free headers
-    if (g_curlHeaders != SList_Empty) {
-        curl_slist_free_all(g_curlHeaders);
-        g_curlHeaders = SList_Empty;
-    }
 }

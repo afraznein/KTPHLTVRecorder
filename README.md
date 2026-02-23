@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.4.0** - Automatic HLTV demo recording for KTP competitive matches.
+**Version 1.5.1** - Automatic HLTV demo recording for KTP competitive matches.
 
 ## Overview
 
@@ -39,7 +39,16 @@ hltv_enabled = 1
 hltv_api_url = http://74.91.112.242:8087
 hltv_api_key = your-api-key-here
 hltv_port = 27020
+hltv_stop_delay = 75
 ```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `hltv_enabled` | `0` | Enable/disable recording (1/0) |
+| `hltv_api_url` | | HLTV API base URL |
+| `hltv_api_key` | | API authentication key |
+| `hltv_port` | `27020` | Paired HLTV instance port |
+| `hltv_stop_delay` | `75` | Seconds to wait after match end before sending stoprecording (10-300). Must exceed HLTV delay setting. |
 
 Each game server needs its own config with its paired HLTV port:
 
@@ -68,10 +77,13 @@ Each half gets its own demo file. The matchId already contains the map name (e.g
 ## How It Works
 
 1. Plugin registers handlers for `ktp_match_start` and `ktp_match_end` forwards
-2. On match start: sends HTTP POST to HLTV API with `record <demoname>` command
-3. API writes command to FIFO pipe, which feeds HLTV stdin
-4. On match end: sends `stoprecording` via same flow
-5. HLTV saves the demo to its configured demo directory
+2. On half 1 start: sends `record <demoname>` via HTTP POST to HLTV API
+3. On map change (half transition): does **nothing** — HLTV keeps recording, delay buffer drains naturally
+4. On half 2+ start: sends `stoprecording` (buffer drained, safe), then `record <new_demoname>`
+5. On match end: schedules delayed `stoprecording` (default 75s) to let buffer drain
+6. HLTV saves each half as a separate demo file
+
+**Why delayed stop?** HLTV has a ~60 second delay buffer. Sending `stoprecording` immediately discards unwritten buffer content, losing ~47 seconds of gameplay. The delayed approach ensures all content is written before the demo is closed.
 
 ## Architecture
 

@@ -19,3 +19,8 @@ hltv_api_key = your-api-key-here
 ;   Game Server Atlanta 3 (27017) -> HLTV 27022
 ;   etc.
 hltv_port = 27020
+
+; Delay (seconds) before sending stoprecording after match end
+; Allows the HLTV delay buffer (~60s) to fully drain before closing the demo
+; Must be greater than HLTV delay setting (default 60s). Minimum 10, maximum 300.
+hltv_stop_delay = 75
