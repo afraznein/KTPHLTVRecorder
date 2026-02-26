@@ -2,7 +2,7 @@
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.5.0
+ * VERSION: 1.5.2
  * DATE: 2026-02-18
  *
  * DESCRIPTION:
@@ -67,7 +67,7 @@
 #include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.5.1"
+#define PLUGIN_VERSION "1.5.2"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -285,6 +285,9 @@ stock send_hltv_health_check() {
     // Set URL
     curl_easy_setopt(curl, CURLOPT_URL, url);
 
+    // Set persistent headers (auth required for some API endpoints)
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
+
     // GET request (no POST data)
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
 
@@ -300,12 +303,11 @@ stock send_hltv_health_check() {
 
 // Callback for HLTV health check
 public hltv_health_callback(CURL:curl, CURLcode:code) {
-    curl_easy_cleanup(curl);
-
     if (code != CURLE_OK) {
         new error[128];
         curl_easy_strerror(code, error, charsmax(error));
         log_amx("[KTP HLTV] Health check FAILED: code=%d error='%s'", _:code, error);
+        curl_easy_cleanup(curl);
 
         // Alert and attempt recovery
         new msg[256];
@@ -321,8 +323,27 @@ public hltv_health_callback(CURL:curl, CURLcode:code) {
         return;
     }
 
+    // Check HTTP response code (transport OK doesn't mean API OK)
+    new httpCode;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode);
+    curl_easy_cleanup(curl);
+
+    if (httpCode < 200 || httpCode >= 300) {
+        log_amx("[KTP HLTV] Health check FAILED: HTTP %d", httpCode);
+
+        new msg[256];
+        formatex(msg, charsmax(msg), "HLTV API returned HTTP %d. Attempting restart...", httpCode);
+        alert_hltv_failure(msg);
+
+        log_amx("[KTP HLTV] Attempting HLTV instance restart as recovery...");
+        send_hltv_restart();
+
+        set_task(5.0, "task_delayed_recording_start");
+        return;
+    }
+
     // Health check passed
-    log_amx("[KTP HLTV] Health check passed, starting recording");
+    log_amx("[KTP HLTV] Health check passed (HTTP %d), starting recording", httpCode);
 
     // Now start the actual recording
     start_recording();
@@ -515,17 +536,30 @@ public hltv_api_callback(CURL:curl, CURLcode:code) {
         new error[128];
         curl_easy_strerror(code, error, charsmax(error));
         log_amx("[KTP HLTV] HTTP API error: code=%d error='%s'", _:code, error);
+        curl_easy_cleanup(curl);
 
         // Alert on recording command failure
         new msg[256];
         formatex(msg, charsmax(msg), "Recording command failed: %s", error);
         alert_hltv_failure(msg);
-    } else {
-        log_amx("[KTP HLTV] HTTP API request successful");
+        return;
     }
 
-    // Cleanup curl handle only - headers are persistent (shared across requests)
+    // Check HTTP response code
+    new httpCode;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode);
     curl_easy_cleanup(curl);
+
+    if (httpCode < 200 || httpCode >= 300) {
+        log_amx("[KTP HLTV] HTTP API error: HTTP %d", httpCode);
+
+        new msg[256];
+        formatex(msg, charsmax(msg), "HLTV API returned HTTP %d", httpCode);
+        alert_hltv_failure(msg);
+        return;
+    }
+
+    log_amx("[KTP HLTV] HTTP API request successful (HTTP %d)", httpCode);
 }
 
 // ============================================================================
@@ -614,14 +648,26 @@ stock send_hltv_restart() {
 
 // Callback for HLTV restart response
 public hltv_restart_callback(CURL:curl, CURLcode:code) {
-    new success = (code == CURLE_OK);
+    new bool:success = true;
 
-    if (!success) {
+    if (code != CURLE_OK) {
         new error[128];
         curl_easy_strerror(code, error, charsmax(error));
         log_amx("[KTP HLTV] Restart failed: code=%d error='%s'", _:code, error);
+        curl_easy_cleanup(curl);
+        success = false;
     } else {
-        log_amx("[KTP HLTV] HLTV restart successful (port %d)", g_hltvPort);
+        // Check HTTP response code
+        new httpCode;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode);
+        curl_easy_cleanup(curl);
+
+        if (httpCode < 200 || httpCode >= 300) {
+            log_amx("[KTP HLTV] Restart failed: HTTP %d (port %d)", httpCode, g_hltvPort);
+            success = false;
+        } else {
+            log_amx("[KTP HLTV] HLTV restart successful (port %d, HTTP %d)", g_hltvPort, httpCode);
+        }
     }
 
     // Notify the admin who requested the restart
@@ -634,7 +680,4 @@ public hltv_restart_callback(CURL:curl, CURLcode:code) {
     }
 
     g_restartRequesterId = 0;
-
-    // Cleanup curl handle only - headers are persistent (shared across requests)
-    curl_easy_cleanup(curl);
 }

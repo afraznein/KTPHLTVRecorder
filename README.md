@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.5.1** - Automatic HLTV demo recording for KTP competitive matches.
+**Version 1.5.2** - Automatic HLTV demo recording for KTP competitive matches.
 
 ## Overview
 

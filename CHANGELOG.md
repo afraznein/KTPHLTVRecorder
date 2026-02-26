@@ -2,6 +2,15 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.5.2] - 2026-02-25
+
+### Fixed
+- **HTTP API errors silently treated as success** - All three callbacks (`hltv_health_callback`, `hltv_api_callback`, `hltv_restart_callback`) only checked `CURLcode` (transport-level result), never the HTTP response code. API errors (401, 404, 500) were invisible — a misconfigured API key or wrong port would silently produce no demos with no alerts. Now calls `curl_easy_getinfo(CURLINFO_RESPONSE_CODE)` and treats non-2xx as failure with Discord/chat alerts.
+- **Health check missing auth headers** - `send_hltv_health_check()` didn't include `g_curlHeaders`, so the X-Auth-Key header was absent. Added for consistency with all other API requests.
+- **Stale header comment** - VERSION in header block said 1.5.0, now matches actual version.
+
+---
+
 ## [1.5.1] - 2026-02-18
 
 ### Fixed
