@@ -1,8 +1,8 @@
-/* KTP HLTV Recorder v1.5.1
+/* KTP HLTV Recorder v1.5.3
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.5.2
+ * VERSION: 1.5.3
  * DATE: 2026-02-18
  *
  * DESCRIPTION:
@@ -38,6 +38,10 @@
  *   immediately killed the buffer, losing ~47 seconds of gameplay.
  *
  * CHANGELOG:
+ *   v1.5.3 (2026-03-06):
+ *     - Fixed second half demo cutoff (~45-48s lost) — plugin_cfg() sent stoprecording
+ *       immediately after match-end map change instead of re-scheduling the delayed stop.
+ *       The HLTV delay buffer hadn't drained yet. Now re-schedules task_delayed_match_stop.
  *   v1.5.1 (2026-02-18):
  *     - Fixed segfault on half 2 start caused by shared g_curlHeaders use-after-free
  *     - Curl headers now created once at init and reused (never freed per-request)
@@ -67,7 +71,7 @@
 #include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.5.2"
+#define PLUGIN_VERSION "1.5.3"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -154,11 +158,13 @@ public plugin_cfg() {
             get_localinfo("_ktp_mid", matchId, charsmax(matchId));
 
             if (!matchId[0]) {
-                // No active match — safe to send stoprecording now
-                // The delay buffer has drained during the map change
-                log_amx("[KTP HLTV] Pending stop detected (no active match) - sending stoprecording");
-                send_hltv_command("stoprecording");
-                set_localinfo("_ktp_hltv_pending_stop", "");
+                // No active match — re-schedule delayed stop to let HLTV buffer drain.
+                // The original delayed task was destroyed by the map change.
+                // We can't send stoprecording immediately — the HLTV delay buffer (~60s)
+                // still has content that hasn't been written to the demo file yet.
+                log_amx("[KTP HLTV] Pending stop detected (no active match) - scheduling delayed stoprecording (%ds)", g_hltvStopDelay);
+                remove_task(TASK_DELAYED_STOP);
+                set_task(float(g_hltvStopDelay), "task_delayed_match_stop", TASK_DELAYED_STOP);
             } else {
                 log_amx("[KTP HLTV] Pending stop detected but match active (mid=%s) - deferring to match_start", matchId);
             }

@@ -2,6 +2,13 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.5.3] - 2026-03-06
+
+### Fixed
+- **Second half demo cutoff (~45-48 seconds lost)** - The v1.5.0 fix only resolved first half cutoff. At match end, `ktp_match_end` scheduled a 75-second delayed `stoprecording` to let the HLTV buffer drain, but the subsequent map change destroyed the task. `plugin_cfg()` on the new map detected `_ktp_hltv_pending_stop` and sent `stoprecording` immediately — before the ~60s delay buffer had drained. Now `plugin_cfg()` re-schedules the delayed stop task instead of sending `stoprecording` immediately.
+
+---
+
 ## [1.5.2] - 2026-02-25
 
 ### Fixed
