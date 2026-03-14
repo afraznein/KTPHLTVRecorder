@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.5.3
+/* KTP HLTV Recorder v1.5.4
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.5.3
- * DATE: 2026-02-18
+ * VERSION: 1.5.4
+ * DATE: 2026-03-13
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -38,6 +38,17 @@
  *   immediately killed the buffer, losing ~47 seconds of gameplay.
  *
  * CHANGELOG:
+ *   v1.5.4 (2026-03-13):
+ *     - Fixed delayed recording task had no task ID — back-to-back matches could
+ *       overwrite pending globals, causing missed or duplicate recordings
+ *     - Fixed 5s recovery delay racing 30s HLTV restart — increased to 35s
+ *     - Fixed g_restartRequesterId global corrupted by concurrent .hltvrestart —
+ *       now passes requester ID through curl data parameter
+ *     - Fixed version message used raw player ID as task ID — now uses offset
+ *     - Changed version announcement from all players to admin-only
+ *     - Added client_disconnected to clean up version task
+ *     - Added port validation (1024-65535) in config loader
+ *     - Increased configsDir buffer from 128 to 256
  *   v1.5.3 (2026-03-06):
  *     - Fixed second half demo cutoff (~45-48s lost) — plugin_cfg() sent stoprecording
  *       immediately after match-end map change instead of re-scheduling the delayed stop.
@@ -71,16 +82,18 @@
 #include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.5.3"
+#define PLUGIN_VERSION "1.5.4"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
 #define ADMIN_HLTVRESTART ADMIN_RCON
 
-// Task IDs
-#define TASK_DELAYED_STOP 5500
+// Task IDs (KTPHLTVRecorder owns 5500-5534)
+#define TASK_DELAYED_STOP    5500
+#define TASK_DELAYED_RECORD  5501
+#define TASK_VERSION_BASE    5502  // + player id (range 5503-5534)
 
-// Match types (must match KTPMatchHandler enum)
+// Match types (must match KTPMatchHandler enum — verified against v0.10.95)
 enum MatchType {
     MATCH_TYPE_COMPETITIVE = 0,
     MATCH_TYPE_SCRIM = 1,
@@ -113,7 +126,7 @@ new curl_slist:g_curlHeaders = SList_Empty;
 public plugin_init() {
     register_plugin(PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
 
-    // Load configuration
+    // Load configuration first — init_curl_headers() needs g_hltvApiKey from config
     load_config();
 
     // Build persistent curl headers (reused for all requests)
@@ -184,22 +197,24 @@ public plugin_end() {
     }
 }
 
-// Player joined - schedule version display
+// Player joined - schedule version display for admins only
 public client_putinserver(id) {
-    // Skip bots and HLTV
     if (is_user_bot(id) || is_user_hltv(id))
         return;
 
-    // Delayed version announcement (5 seconds)
-    set_task(5.0, "fn_version_display", id);
+    if (get_user_flags(id) & ADMIN_HLTVRESTART)
+        set_task(5.0, "fn_version_display", id + TASK_VERSION_BASE);
 }
 
-public fn_version_display(id) {
-    // Safety check - player may have disconnected during delay
-    if (!is_user_connected(id))
+public client_disconnected(id) {
+    remove_task(id + TASK_VERSION_BASE);
+}
+
+public fn_version_display(taskid) {
+    new id = taskid - TASK_VERSION_BASE;
+    if (id < 1 || id > MAX_PLAYERS || !is_user_connected(id))
         return;
 
-    // Version announcement
     client_print(id, print_chat, "%s version %s by %s", PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
 }
 
@@ -223,8 +238,9 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) 
         return;
     }
 
-    // Cancel any pending delayed stop task (e.g., back-to-back matches)
+    // Cancel any pending tasks from previous match
     remove_task(TASK_DELAYED_STOP);
+    remove_task(TASK_DELAYED_RECORD);
 
     // Clear pending stop flag
     set_localinfo("_ktp_hltv_pending_stop", "");
@@ -325,7 +341,8 @@ public hltv_health_callback(CURL:curl, CURLcode:code) {
         send_hltv_restart();
 
         // Still try to start recording after a delay (HLTV might recover)
-        set_task(5.0, "task_delayed_recording_start");
+        remove_task(TASK_DELAYED_RECORD);
+        set_task(35.0, "task_delayed_recording_start", TASK_DELAYED_RECORD);
         return;
     }
 
@@ -344,7 +361,8 @@ public hltv_health_callback(CURL:curl, CURLcode:code) {
         log_amx("[KTP HLTV] Attempting HLTV instance restart as recovery...");
         send_hltv_restart();
 
-        set_task(5.0, "task_delayed_recording_start");
+        remove_task(TASK_DELAYED_RECORD);
+        set_task(35.0, "task_delayed_recording_start", TASK_DELAYED_RECORD);
         return;
     }
 
@@ -356,7 +374,7 @@ public hltv_health_callback(CURL:curl, CURLcode:code) {
 }
 
 // Delayed recording attempt after HLTV recovery
-public task_delayed_recording_start() {
+public task_delayed_recording_start(taskid) {
     if (g_pendingDemoName[0]) {
         log_amx("[KTP HLTV] Attempting delayed recording start after recovery attempt");
         start_recording();
@@ -439,7 +457,7 @@ public task_delayed_match_stop() {
 
 // Load configuration from hltv_recorder.ini
 stock load_config() {
-    new configsDir[128], configPath[192];
+    new configsDir[256], configPath[320];
     get_configsdir(configsDir, charsmax(configsDir));
     formatex(configPath, charsmax(configPath), "%s/hltv_recorder.ini", configsDir);
 
@@ -482,6 +500,10 @@ stock load_config() {
             copy(g_hltvApiKey, charsmax(g_hltvApiKey), value);
         } else if (equali(key, "hltv_port")) {
             g_hltvPort = str_to_num(value);
+            if (g_hltvPort < 1024 || g_hltvPort > 65535) {
+                server_print("[KTP HLTV] WARNING: Invalid hltv_port %d, defaulting to 27020", g_hltvPort);
+                g_hltvPort = 27020;
+            }
         } else if (equali(key, "hltv_stop_delay")) {
             g_hltvStopDelay = str_to_num(value);
             if (g_hltvStopDelay < 10) g_hltvStopDelay = 10;  // minimum 10 seconds
@@ -572,9 +594,6 @@ public hltv_api_callback(CURL:curl, CURLcode:code) {
 // Admin Commands
 // ============================================================================
 
-// Store ID of admin who requested restart (for callback notification)
-new g_restartRequesterId = 0;
-
 // Admin command to restart paired HLTV instance
 public cmd_hltv_restart(id) {
     // Check admin access
@@ -604,18 +623,16 @@ public cmd_hltv_restart(id) {
         adminName, adminAuth, g_hltvPort);
     ktp_discord_send_embed_audit("<:ktp:1105490705188659272> HLTV Restart", description, KTP_DISCORD_COLOR_ORANGE);
 
-    // Store requester ID for callback
-    g_restartRequesterId = id;
-
-    // Send restart request
+    // Send restart request (pass requester ID to callback via data parameter)
     client_print(id, print_chat, "[KTP HLTV] Restarting HLTV on port %d...", g_hltvPort);
-    send_hltv_restart();
+    send_hltv_restart(id);
 
     return PLUGIN_HANDLED;
 }
 
 // Send restart request to HLTV API
-stock send_hltv_restart() {
+// requesterId: player ID of admin who requested (0 = automated recovery)
+stock send_hltv_restart(requesterId = 0) {
     if (!g_hltvApiUrl[0]) {
         log_amx("[KTP HLTV] ERROR: hltv_api_url not configured");
         return;
@@ -648,12 +665,15 @@ stock send_hltv_restart() {
     // Debug log
     log_amx("[KTP HLTV] Sending restart request to %s", url);
 
-    // Perform request asynchronously
-    curl_easy_perform(curl, "hltv_restart_callback");
+    // Perform request asynchronously (pass requester ID via data parameter)
+    new data[1];
+    data[0] = requesterId;
+    curl_easy_perform(curl, "hltv_restart_callback", data, sizeof(data));
 }
 
 // Callback for HLTV restart response
-public hltv_restart_callback(CURL:curl, CURLcode:code) {
+public hltv_restart_callback(CURL:curl, CURLcode:code, const data[]) {
+    new requesterId = data[0];
     new bool:success = true;
 
     if (code != CURLE_OK) {
@@ -676,14 +696,12 @@ public hltv_restart_callback(CURL:curl, CURLcode:code) {
         }
     }
 
-    // Notify the admin who requested the restart
-    if (g_restartRequesterId > 0 && is_user_connected(g_restartRequesterId)) {
+    // Notify the admin who requested the restart (0 = automated recovery, skip)
+    if (requesterId > 0 && requesterId <= MAX_PLAYERS && is_user_connected(requesterId)) {
         if (success) {
-            client_print(g_restartRequesterId, print_chat, "[KTP HLTV] HLTV on port %d restarted successfully.", g_hltvPort);
+            client_print(requesterId, print_chat, "[KTP HLTV] HLTV on port %d restarted successfully.", g_hltvPort);
         } else {
-            client_print(g_restartRequesterId, print_chat, "[KTP HLTV] HLTV restart failed! Check server logs.");
+            client_print(requesterId, print_chat, "[KTP HLTV] HLTV restart failed! Check server logs.");
         }
     }
-
-    g_restartRequesterId = 0;
 }

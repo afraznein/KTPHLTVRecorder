@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.5.3** - Automatic HLTV demo recording for KTP competitive matches.
+**Version 1.5.4** - Automatic HLTV demo recording for KTP competitive matches.
 
 ## Overview
 
@@ -15,7 +15,7 @@ KTPHLTVRecorder hooks into [KTPMatchHandler](https://github.com/afraznein/KTPMat
 - **Pre-match HLTV health check** - Verifies HLTV API before recording, auto-recovery on failure
 - **Discord + chat alerts** - Notifies admins when HLTV recording fails
 - **Admin HLTV restart command** - `.hltvrestart` or `/hltvrestart` to restart paired HLTV instance
-- **Player version display** - Shows plugin version to players on connect (5 second delay)
+- **Admin version display** - Shows plugin version to admins on connect (5 second delay)
 
 ## Requirements
 

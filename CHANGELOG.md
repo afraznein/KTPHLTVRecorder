@@ -2,6 +2,22 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.5.4] - 2026-03-13
+
+### Fixed
+- **Delayed recording task had no task ID** — Back-to-back matches could overwrite `g_pendingDemoName` before the delayed task fires, causing missed or duplicate recordings. Now uses `TASK_DELAYED_RECORD` (5501) with proper `remove_task` on new match start.
+- **5-second recovery delay raced 30-second HLTV restart** — After health check failure, `send_hltv_restart()` had a 30s timeout but the recovery recording attempt fired after only 5s, hitting the still-restarting API. Increased to 35s.
+- **`g_restartRequesterId` global corrupted by concurrent `.hltvrestart`** — Second admin overwrote the requester ID before the first async callback fired. Now passes requester ID through `curl_easy_perform` data parameter.
+- **Version message task used raw player ID** — Could collide on reconnect within 5s. Now uses `id + TASK_VERSION_BASE` offset with cleanup on `client_disconnected`.
+
+### Changed
+- Version announcement restricted to admins only (was shown to all players).
+- Port validation added: `hltv_port` clamped to 1024-65535 range.
+- `configsDir` buffer increased from 128 to 256 bytes.
+- Task ID namespace documented: KTPHLTVRecorder owns 5500-5534.
+
+---
+
 ## [1.5.3] - 2026-03-06
 
 ### Fixed
