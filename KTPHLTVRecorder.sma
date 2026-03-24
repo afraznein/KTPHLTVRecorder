@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.5.4
+/* KTP HLTV Recorder v1.5.6
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.5.4
- * DATE: 2026-03-13
+ * VERSION: 1.5.6
+ * DATE: 2026-03-24
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -38,6 +38,11 @@
  *   immediately killed the buffer, losing ~47 seconds of gameplay.
  *
  * CHANGELOG:
+ *   v1.5.5 (2026-03-17):
+ *     - Record command now verifies demo file creation via HLTV API (2s check)
+ *     - Recording success/failure reported to in-game chat for all players
+ *     - HTTP 200 = confirmed, HTTP 422 = demo not created (e.g., filename with spaces)
+ *     - Increased curl timeout from 5s to 8s to accommodate API verification delay
  *   v1.5.4 (2026-03-13):
  *     - Fixed delayed recording task had no task ID — back-to-back matches could
  *       overwrite pending globals, causing missed or duplicate recordings
@@ -82,16 +87,15 @@
 #include <ktp_discord>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.5.4"
+#define PLUGIN_VERSION "1.5.6"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
 #define ADMIN_HLTVRESTART ADMIN_RCON
 
-// Task IDs (KTPHLTVRecorder owns 5500-5534)
+// Task IDs
 #define TASK_DELAYED_STOP    5500
 #define TASK_DELAYED_RECORD  5501
-#define TASK_VERSION_BASE    5502  // + player id (range 5503-5534)
 
 // Match types (must match KTPMatchHandler enum — verified against v0.10.95)
 enum MatchType {
@@ -105,7 +109,7 @@ enum MatchType {
 
 // Configuration
 new g_hltvEnabled = 0;
-new g_hltvApiUrl[128];
+new g_hltvApiUrl[256];
 new g_hltvApiKey[64];
 new g_hltvPort = 27020;
 new g_hltvStopDelay = 75;  // seconds to wait before stoprecording at match end
@@ -116,6 +120,7 @@ new bool:g_matchActive = false;  // true between match_start and match_end
 new g_pendingMatchId[64];        // Match ID waiting for health check
 new g_pendingDemoName[128];      // Demo name waiting for health check
 new g_pendingHalf;               // Half number waiting for health check
+new g_lastRecordDemoName[128];   // Demo name for record callback chat notification (set before perform, read in callback)
 
 // Curl state - headers are created once and reused for all requests.
 // IMPORTANT: Do NOT free/recreate these per-request. Multiple async curl handles
@@ -137,15 +142,19 @@ public plugin_init() {
     register_clcmd("say_team .hltvrestart", "cmd_hltv_restart");
     register_clcmd("say /hltvrestart", "cmd_hltv_restart");
 
-    server_print("[KTP HLTV] %s v%s loaded - API: %s port=%d (enabled=%d, stop_delay=%d)",
-        PLUGIN_NAME, PLUGIN_VERSION, g_hltvApiUrl, g_hltvPort, g_hltvEnabled, g_hltvStopDelay);
 }
 
-// Create persistent header list - called once after config is loaded
+// Create persistent header list - called ONCE after config is loaded.
+// NEVER call this again while async requests may be in flight — the slist
+// is shared across all concurrent curl handles. See v1.5.1 segfault fix.
 stock init_curl_headers() {
-    if (g_curlHeaders != SList_Empty) {
-        curl_slist_free_all(g_curlHeaders);
-        g_curlHeaders = SList_Empty;
+    if (g_curlHeaders != SList_Empty)
+        return;  // Already initialized — do not rebuild
+
+    // Skip if API key not configured (avoids building useless auth header)
+    if (!g_hltvApiKey[0]) {
+        log_amx("[KTP HLTV] WARNING: hltv_api_key not configured — curl headers not built");
+        return;
     }
 
     g_curlHeaders = curl_slist_append(SList_Empty, "Content-Type: application/json");
@@ -197,26 +206,7 @@ public plugin_end() {
     }
 }
 
-// Player joined - schedule version display for admins only
-public client_putinserver(id) {
-    if (is_user_bot(id) || is_user_hltv(id))
-        return;
-
-    if (get_user_flags(id) & ADMIN_HLTVRESTART)
-        set_task(5.0, "fn_version_display", id + TASK_VERSION_BASE);
-}
-
-public client_disconnected(id) {
-    remove_task(id + TASK_VERSION_BASE);
-}
-
-public fn_version_display(taskid) {
-    new id = taskid - TASK_VERSION_BASE;
-    if (id < 1 || id > MAX_PLAYERS || !is_user_connected(id))
-        return;
-
-    client_print(id, print_chat, "%s version %s by %s", PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
-}
+// Version broadcast removed — no need to send plugin info to players
 
 // Forward from KTPMatchHandler - match/half started
 // half: 1=1st half, 2=2nd half, 101+=OT round (101, 102, 103...)
@@ -239,10 +229,16 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) 
     }
 
     // Cancel any pending tasks from previous match
-    remove_task(TASK_DELAYED_STOP);
     remove_task(TASK_DELAYED_RECORD);
 
-    // Clear pending stop flag
+    // If a delayed stop is pending from a previous match, let it fire naturally
+    // so the HLTV delay buffer finishes draining. The stop will close the old demo,
+    // and then our new record command (sent after health check) will start fresh.
+    // Don't cancel TASK_DELAYED_STOP here — the buffer drain must complete.
+    // TIMING SAFETY: The 75s delayed stop always fires before a new match reaches
+    // the record phase. Minimum path: forcereset (~5s) + confirm (~30s) + ready (~60s)
+    // = 95s. The g_matchActive guard in task_delayed_match_stop is the structural
+    // backstop if timing ever collapses.
     set_localinfo("_ktp_hltv_pending_stop", "");
 
     // For half > 1 (2nd half, OT rounds): stop previous recording first.
@@ -395,22 +391,86 @@ stock start_recording() {
         formatex(halfStr, charsmax(halfStr), "OT%d", g_pendingHalf - 100);
     }
 
-    // Send record command to HLTV via HTTP API
+    if (!g_hltvApiUrl[0]) {
+        log_amx("[KTP HLTV] ERROR: hltv_api_url not configured");
+        alert_hltv_failure("HLTV API URL not configured");
+        return;
+    }
+
+    // Save demo name for callback chat notification
+    copy(g_lastRecordDemoName, charsmax(g_lastRecordDemoName), g_pendingDemoName);
+
+    // Build record command
     new command[256];
     formatex(command, charsmax(command), "record %s", g_pendingDemoName);
 
-    if (send_hltv_command(command)) {
-        server_print("[KTP HLTV] Started recording: %s.dem (%s)", g_pendingDemoName, halfStr);
-        log_amx("[KTP HLTV] Recording started: %s.dem (match_id=%s %s)", g_pendingDemoName, g_pendingMatchId, halfStr);
-    } else {
-        server_print("[KTP HLTV] Failed to start recording!");
-        log_amx("[KTP HLTV] ERROR: Failed to start recording (match_id=%s %s)", g_pendingMatchId, halfStr);
-        alert_hltv_failure("Failed to send record command");
+    // Build URL
+    new url[256];
+    formatex(url, charsmax(url), "%s/hltv/%d/command", g_hltvApiUrl, g_hltvPort);
+
+    // Build JSON payload
+    new payload[512];
+    formatex(payload, charsmax(payload), "{^"command^":^"%s^"}", command);
+
+    // Create cURL handle
+    new CURL:curl = curl_easy_init();
+    if (!curl) {
+        log_amx("[KTP HLTV] ERROR: curl_easy_init() failed for record");
+        alert_hltv_failure("Failed to initialize HTTP client");
+        return;
     }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
+    curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, payload);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8);  // API sleeps 2s to verify, so allow extra time
+
+    log_amx("[KTP HLTV] Sending record command: %s", payload);
+    log_amx("[KTP HLTV] Recording: %s.dem (match_id=%s %s)", g_pendingDemoName, g_pendingMatchId, halfStr);
+
+    // Use dedicated callback that reports to chat
+    curl_easy_perform(curl, "hltv_record_callback");
 
     // Clear pending state
     g_pendingDemoName[0] = EOS;
     g_pendingMatchId[0] = EOS;
+}
+
+// Callback for record command — reports result to in-game chat
+public hltv_record_callback(CURL:curl, CURLcode:code) {
+    if (code != CURLE_OK) {
+        new error[128];
+        curl_easy_strerror(code, error, charsmax(error));
+        log_amx("[KTP HLTV] Record command failed: code=%d error='%s'", _:code, error);
+        curl_easy_cleanup(curl);
+
+        client_print(0, print_chat, "[KTP HLTV] ERROR: Recording failed - %s", error);
+        alert_hltv_failure("Recording command failed");
+        return;
+    }
+
+    new httpCode;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode);
+    curl_easy_cleanup(curl);
+
+    if (httpCode == 200) {
+        // API confirmed demo file was created
+        log_amx("[KTP HLTV] Recording confirmed (HTTP 200): %s", g_lastRecordDemoName);
+        client_print(0, print_chat, "[KTP HLTV] Recording: %s", g_lastRecordDemoName);
+    } else if (httpCode == 422) {
+        // API sent command but demo file was NOT created
+        log_amx("[KTP HLTV] Recording NOT confirmed (HTTP 422): %s", g_lastRecordDemoName);
+        client_print(0, print_chat, "[KTP HLTV] ERROR: Recording failed for %s - demo file not created", g_lastRecordDemoName);
+        alert_hltv_failure("HLTV rejected record command (demo file not created)");
+    } else {
+        // Other HTTP error
+        log_amx("[KTP HLTV] Record command HTTP error: %d", httpCode);
+        client_print(0, print_chat, "[KTP HLTV] ERROR: Recording may have failed (HTTP %d)", httpCode);
+
+        new msg[256];
+        formatex(msg, charsmax(msg), "HLTV API returned HTTP %d for record command", httpCode);
+        alert_hltv_failure(msg);
+    }
 }
 
 // Alert about HLTV failure via Discord and chat
@@ -450,6 +510,12 @@ public ktp_match_end(const matchId[], const map[], MatchType:matchType, team1Sco
 
 // Delayed stop task - fires g_hltvStopDelay seconds after match end
 public task_delayed_match_stop() {
+    // Guard: if a new match started before this fires, don't kill the new recording
+    if (g_matchActive) {
+        log_amx("[KTP HLTV] Delayed stop skipped — new match already active");
+        set_localinfo("_ktp_hltv_pending_stop", "");
+        return;
+    }
     log_amx("[KTP HLTV] Delayed stop firing - sending stoprecording (buffer drain complete)");
     send_hltv_command("stoprecording");
     set_localinfo("_ktp_hltv_pending_stop", "");
@@ -603,7 +669,7 @@ public cmd_hltv_restart(id) {
     }
 
     // Check if HLTV is configured
-    if (!g_hltvApiUrl[0] || g_hltvPort <= 0) {
+    if (!g_hltvApiUrl[0]) {
         client_print(id, print_chat, "[KTP HLTV] HLTV not configured for this server.");
         return PLUGIN_HANDLED;
     }

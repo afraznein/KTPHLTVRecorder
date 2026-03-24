@@ -2,6 +2,33 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.5.6] - 2026-03-24
+
+### Fixed
+- **Delayed stop preserved + guarded against killing new recordings** — Previously, `remove_task(TASK_DELAYED_STOP)` cancelled the pending stoprecording when a new match started, which could leave the previous recording open indefinitely. Now the delayed stop task is preserved so the HLTV buffer drain completes naturally. Added `g_matchActive` guard in `task_delayed_match_stop` so the stop is skipped if a new match is already recording — prevents the edge case where the old delayed stop fires after a new recording has started.
+- **`init_curl_headers` no longer frees/rebuilds** — The guard that freed and rebuilt the slist could trigger a use-after-free if called while async requests were in flight. Now returns immediately if already initialized. Also skips building headers when API key is not configured.
+- **`g_hltvApiUrl` buffer increased from 128 to 256** — Matches downstream URL buffers, prevents silent truncation on long API URLs.
+- **Dead `g_hltvPort <= 0` guard removed** — Port is validated to 1024-65535 in `load_config`, so this check was unreachable.
+
+### Changed
+- **Version display removed** — No longer sends plugin info to players on connect.
+- **`server_print` removed from `plugin_init`** — Fires on every map change; `register_plugin` already records the plugin.
+- **Dead code cleanup** — Removed `TASK_VERSION_BASE`, `fn_version_display`, `client_putinserver`, `client_disconnected` version task management.
+
+---
+
+## [1.5.5] - 2026-03-17
+
+### Added
+- **Recording verification with in-game chat feedback** — After sending the `record` command, the HLTV API now waits 2 seconds and checks if the `.dem` file was created on disk. The plugin reports the result to all players via chat: success shows the demo name, failure triggers a chat error + Discord alert. This would have caught the Practice Mode hostname bug (space in filename caused HLTV to reject the command silently).
+
+### Changed
+- Record command uses dedicated `hltv_record_callback` instead of the generic `hltv_api_callback`, enabling recording-specific chat notifications.
+- Curl timeout for record commands increased from 5s to 8s to accommodate the API's 2s verification delay.
+- HLTV API updated to v2.1: returns HTTP 200 (recording confirmed) or HTTP 422 (demo file not created) for record commands.
+
+---
+
 ## [1.5.4] - 2026-03-13
 
 ### Fixed
