@@ -1,6 +1,5 @@
 # Local dev files (not committed)
 CLAUDE.md
-compile.sh
 nul
 
 # Compiled plugins (source is authoritative)

@@ -85,9 +85,10 @@
 #include <amxmisc>
 #include <curl>
 #include <ktp_discord>
+#include <ktp_version_reporter>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.5.6"
+#define PLUGIN_VERSION "1.5.7"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -130,6 +131,7 @@ new curl_slist:g_curlHeaders = SList_Empty;
 
 public plugin_init() {
     register_plugin(PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
+    KTP_RegisterVersion(PLUGIN_NAME, PLUGIN_VERSION);
 
     // Load configuration first — init_curl_headers() needs g_hltvApiKey from config
     load_config();
