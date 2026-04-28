@@ -13,7 +13,7 @@ on:
 
 jobs:
   smoke:
-    uses: ${{ github.repository_owner }}/KTPInfrastructure/.github/workflows/smoke-callable.yml@main
+    uses: afraznein/KTPInfrastructure/.github/workflows/smoke-callable.yml@main
     with:
       under_test_label: KTPHLTVRecorder
       under_test_kind: amx_plugin
