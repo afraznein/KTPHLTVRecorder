@@ -2,6 +2,29 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.6.0] - 2026-04-28
+
+### Fixed
+- **Match-id bleed across half/match boundaries** — HLTV silently ignored `record <new>` commands while already recording, keeping the original basename and bleeding subsequent matches into wrong demo files. Fleet-wide audit (1041 demos, 2026-04-28) found 60 misfiled match keys / 350 files / 59 missing-h1 cases across all regions. Worst case: CHI1 match `1776218309-CHI1` h1 had 70 files from a 23h scrim session all under the original basename. Root cause confirmed via journal: `Already recording to <X>.dem.` events at every map change with no `Stop recording` between matches.
+
+### Added
+- **`/state` polling before `record`** — plugin now queries the new `GET /hltv/<port>/state` endpoint before issuing `record`. Polls up to 10 times at 500ms intervals (5s budget) until HLTV reports it is not recording, then issues the record command. Best-effort fallback after timeout (issues record anyway with Discord alert) so a stuck HLTV never blocks the next match's recording.
+- **Post-record verification** — 3 seconds after `record` HTTP 200, plugin polls `/state` and compares HLTV's reported basename against what we asked for. If mismatch (bleed) or `recording=false` (silent failure), broadcasts a chat alert to all players + posts a Discord audit embed naming both basenames. Players see "Demo bleed detected" instead of finding out a week later.
+- **Post-deferred-stop verification** — after match-end stoprecording fires (75s after `MATCH_END`), polls `/state` to confirm HLTV actually stopped. Alerts on stuck recordings.
+- **Process-down detection** — `/state` returns `process_running: false` when `hltv@<port>.service` is inactive. Plugin no longer fires `record` into the void; surfaces immediately as "HLTV is not running — recording disabled for this match."
+- **Already-recording journal signal** — `/state` exposes `already_recording_warning: true` when HLTV's most recent journal event was the explicit "Already recording to ..." line (HLTV's silent-rejection signature). Plugin treats this as bleed and alerts.
+
+### Changed
+- Requires hltv-api.py v2.2+ (provides `GET /hltv/<port>/state`). Older API responds 400 to /state path; plugin falls back to best-effort behavior in that case.
+- `start_recording` is now a thin entry point that hands off to the new `poll_idle_then_record` state machine. Existing health-check + recovery logic unchanged.
+- `task_delayed_match_stop` schedules `task_verify_post_deferred_stop` 3s after issuing stoprecording.
+- `hltv_record_callback` HTTP 200 path no longer prints "Recording: X" immediately — it schedules verification first, and prints either "Recording: X" (verified) or the bleed alert.
+
+### Notes
+- Activates at next nightly restart (~03:00 ET) per the standard `.new` swap. Requires hltv-api.py to be deployed BEFORE plugin activation, else plugin gets 400 on /state and falls back to best-effort. Deploy order matters.
+
+---
+
 ## [1.5.7] - 2026-04-25
 
 ### Added

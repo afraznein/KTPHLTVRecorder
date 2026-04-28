@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.5.6
+/* KTP HLTV Recorder v1.6.0
  * Automatic HLTV demo recording triggered by KTPMatchHandler
  *
  * AUTHOR: Nein_
- * VERSION: 1.5.6
- * DATE: 2026-03-24
+ * VERSION: 1.6.0
+ * DATE: 2026-04-28
  *
  * DESCRIPTION:
  * This plugin hooks into KTPMatchHandler's match start/end forwards
@@ -27,17 +27,27 @@
  *     ktp_KTP-1735052400-dod_anzio_h2.dem (second half)
  *     ktp_KTP-1735052400-dod_anzio_ot1.dem (overtime round 1)
  *
- * RECORDING LIFECYCLE (v1.5.0):
- *   Half 1 starts  -> record <name>_h1
+ * RECORDING LIFECYCLE (v1.6.0):
+ *   Half 1 starts  -> POLL /state until idle -> record <name>_h1
  *   Half 1 ends    -> map changes -> HLTV keeps recording, delay buffer drains
- *   Half 2 starts  -> stoprecording (safe, buffer drained) -> record <name>_h2
+ *   Half 2 starts  -> stoprecording (safe, buffer drained) -> POLL /state until idle -> record <name>_h2
  *   Match ends     -> delayed stoprecording after hltv_stop_delay seconds
+ *                  -> POLL /state to verify HLTV actually stopped
  *
- *   This ensures the HLTV delay buffer (~60s) is never truncated.
- *   Previous versions sent stoprecording on plugin_end/plugin_cfg which
- *   immediately killed the buffer, losing ~47 seconds of gameplay.
+ *   The poll-before-record pattern fixes the demo-bleed bug where HLTV silently
+ *   ignored mid-recording `record <new>` commands and kept writing the OLD
+ *   basename across match/half boundaries (root-caused 2026-04-28 via journal:
+ *   60 misfiled match keys / 350 files / 59 missing-h1 cases fleet-wide).
  *
  * CHANGELOG:
+ *   v1.6.0 (2026-04-28):
+ *     - Fixed match-id bleed: HLTV silently ignores `record <new>` when already
+ *       recording, keeping the original basename across match/half boundaries.
+ *       Now polls /state endpoint after stoprecording until HLTV is confirmed
+ *       idle, then issues record. Best-effort fallback after 5s timeout.
+ *     - Requires hltv-api.py v2.2+ (provides GET /hltv/<port>/state).
+ *     - Added post-deferred-stop verification: after match-end stoprecording
+ *       fires, poll /state to confirm HLTV actually stopped (alerts if not).
  *   v1.5.5 (2026-03-17):
  *     - Record command now verifies demo file creation via HLTV API (2s check)
  *     - Recording success/failure reported to in-game chat for all players
@@ -88,7 +98,7 @@
 #include <ktp_version_reporter>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.5.7"
+#define PLUGIN_VERSION "1.6.0"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -97,6 +107,26 @@
 // Task IDs
 #define TASK_DELAYED_STOP    5500
 #define TASK_DELAYED_RECORD  5501
+#define TASK_POLL_RETRY                5502
+#define TASK_VERIFY_RECORDING_STARTED  5503
+#define TASK_VERIFY_POST_STOP          5504
+
+// State-poll tuning (idle-confirmation before issuing record).
+// Total budget = POLL_MAX_ATTEMPTS * POLL_INTERVAL seconds before falling
+// back to best-effort fire. Default 10*0.5s = 5s — enough for HLTV's
+// stoprecording to settle, short enough to not block the next match start.
+#define POLL_MAX_ATTEMPTS   10
+#define POLL_INTERVAL       0.5
+
+// Verify-after-stop: how long after delayed stoprecording fires before
+// we confirm HLTV actually stopped. Stoprecording flushes the delay buffer
+// which can take a second or two depending on length.
+#define VERIFY_STOPPED_DELAY 3.0
+
+// Pending poll-then-action types.
+#define POLL_ACTION_NONE            0
+#define POLL_ACTION_RECORD          1   // poll until idle, then issue record
+#define POLL_ACTION_VERIFY_STOPPED  2   // poll once, log + alert if still recording
 
 // Match types (must match KTPMatchHandler enum — verified against v0.10.95)
 enum MatchType {
@@ -128,6 +158,13 @@ new g_lastRecordDemoName[128];   // Demo name for record callback chat notificat
 // reference this slist concurrently. Freeing while a request is in flight causes
 // use-after-free segfaults. The headers never change (same Content-Type + API key).
 new curl_slist:g_curlHeaders = SList_Empty;
+
+// Idle-poll state machine (v1.6.0). Only one poll active at a time —
+// match flow guarantees this (one stoprecording at a time, one record at a time).
+new bool:g_pollActive = false;
+new g_pollAttempts = 0;
+new g_pollAction = POLL_ACTION_NONE;
+new g_pollDemoName[128];
 
 public plugin_init() {
     register_plugin(PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
@@ -379,18 +416,219 @@ public task_delayed_recording_start(taskid) {
     }
 }
 
-// Actually start the recording
+// ============================================================================
+// /state polling state machine (v1.6.0)
+//
+// HLTV silently ignores `record <new>` when already recording, keeping the
+// original basename and bleeding subsequent matches into wrong demo files.
+// We can only safely issue `record` when HLTV reports it is NOT recording.
+//
+// The poll machine has two modes:
+//   POLL_ACTION_RECORD          — wait for idle, then issue record + post-verify
+//   POLL_ACTION_VERIFY_STOPPED  — one-shot poll after stoprecording, alert if
+//                                 still recording (HLTV stuck / process dead)
+// ============================================================================
+
+// Begin: poll /state until HLTV is idle, then fire `record <demoName>`.
+stock poll_idle_then_record(const demoName[]) {
+    if (g_pollActive) {
+        // Should not happen — match flow serializes record/stop. Override.
+        log_amx("[KTP HLTV] WARNING: poll already active when starting new poll, overriding");
+        remove_task(TASK_POLL_RETRY);
+    }
+    g_pollActive = true;
+    g_pollAttempts = 0;
+    g_pollAction = POLL_ACTION_RECORD;
+    copy(g_pollDemoName, charsmax(g_pollDemoName), demoName);
+    request_state();
+}
+
+// One-shot: poll /state to confirm HLTV stopped after delayed stoprecording.
+stock poll_verify_stopped() {
+    if (g_pollActive) {
+        log_amx("[KTP HLTV] WARNING: poll already active; verify-stopped overlapping with active poll");
+        remove_task(TASK_POLL_RETRY);
+    }
+    g_pollActive = true;
+    g_pollAttempts = 0;
+    g_pollAction = POLL_ACTION_VERIFY_STOPPED;
+    g_pollDemoName[0] = EOS;
+    request_state();
+}
+
+// Issue GET /hltv/<port>/state. Async; response handled in state_poll_callback.
+stock request_state() {
+    if (!g_hltvApiUrl[0]) {
+        log_amx("[KTP HLTV] ERROR: hltv_api_url not configured (state poll)");
+        on_state_failed();
+        return;
+    }
+
+    new url[256];
+    formatex(url, charsmax(url), "%s/hltv/%d/state", g_hltvApiUrl, g_hltvPort);
+
+    new CURL:curl = curl_easy_init();
+    if (!curl) {
+        log_amx("[KTP HLTV] ERROR: curl_easy_init() failed for state poll");
+        on_state_failed();
+        return;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3);
+    // No WRITEFUNCTION set — module auto-buffers, retrievable via curl_get_response_body
+    curl_easy_perform(curl, "state_poll_callback");
+}
+
+public state_poll_callback(CURL:curl, CURLcode:code) {
+    if (code != CURLE_OK) {
+        new error[64];
+        curl_easy_strerror(code, error, charsmax(error));
+        log_amx("[KTP HLTV] State poll curl error: %s", error);
+        curl_easy_cleanup(curl);
+        on_state_failed();
+        return;
+    }
+
+    new httpCode;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode);
+
+    new body[512];
+    curl_get_response_body(curl, body, charsmax(body));
+    curl_easy_cleanup(curl);
+
+    if (httpCode != 200) {
+        log_amx("[KTP HLTV] State poll HTTP %d: %s", httpCode, body);
+        on_state_failed();
+        return;
+    }
+
+    // Simple substring match against JSON body. json.dumps emits
+    // "recording": false / true (with space) and "process_running": false / true.
+    new bool:idle = (contain(body, "^"recording^": false") != -1);
+    new bool:processDown = (contain(body, "^"process_running^": false") != -1);
+    new bool:alreadyRecording = (contain(body, "^"already_recording_warning^": true") != -1);
+
+    if (alreadyRecording) {
+        // Bleed signal — HLTV's most recent journal event was "Already recording".
+        // Worth surfacing even when we're about to retry.
+        log_amx("[KTP HLTV] WARNING: HLTV journal shows 'Already recording' — bleed in progress");
+    }
+
+    if (idle || processDown) {
+        on_state_idle(processDown);
+        return;
+    }
+
+    // HLTV still recording — extract the current basename for diagnostic
+    // logging and retry until timeout.
+    new currentBase[128];
+    extract_state_basename(body, currentBase, charsmax(currentBase));
+
+    g_pollAttempts++;
+    if (g_pollAttempts < POLL_MAX_ATTEMPTS) {
+        log_amx("[KTP HLTV] State poll: HLTV still recording '%s' (attempt %d/%d), retrying in %.1fs",
+            currentBase, g_pollAttempts, POLL_MAX_ATTEMPTS, POLL_INTERVAL);
+        set_task(POLL_INTERVAL, "task_poll_retry", TASK_POLL_RETRY);
+    } else {
+        // Timeout. For RECORD action: fire anyway as best-effort and warn.
+        // For VERIFY_STOPPED: this IS a failure — HLTV didn't stop after our stoprecording.
+        log_amx("[KTP HLTV] State poll exhausted (still recording '%s' after %d attempts)",
+            currentBase, POLL_MAX_ATTEMPTS);
+        on_state_idle(false);  // Treat as idle for fallback purposes; caller logic handles warning
+        new msg[256];
+        formatex(msg, charsmax(msg), "HLTV did not become idle (still recording '%s') — recording may bleed", currentBase);
+        alert_hltv_failure(msg);
+    }
+}
+
+public task_poll_retry(taskid) {
+    request_state();
+}
+
+// Pull "basename" string out of the /state JSON body. Tolerant — returns "" on parse miss.
+stock extract_state_basename(const body[], output[], maxlen) {
+    output[0] = EOS;
+    new pos = contain(body, "^"basename^":");
+    if (pos == -1) return;
+    pos += 11;  // past "basename":
+    // Skip whitespace
+    while (pos < strlen(body) && (body[pos] == ' ' || body[pos] == '^t')) pos++;
+    if (pos >= strlen(body)) return;
+    if (body[pos] != '"') return;  // null or other non-string
+    pos++;
+    new outIdx = 0;
+    while (pos < strlen(body) && body[pos] != '"' && outIdx < maxlen) {
+        output[outIdx++] = body[pos++];
+    }
+    output[outIdx] = EOS;
+}
+
+// HLTV is idle (or process down) — fire the pending action.
+stock on_state_idle(bool:processDown) {
+    g_pollActive = false;
+    new action = g_pollAction;
+    new demoName[128];
+    copy(demoName, charsmax(demoName), g_pollDemoName);
+
+    g_pollAction = POLL_ACTION_NONE;
+    g_pollDemoName[0] = EOS;
+
+    switch (action) {
+        case POLL_ACTION_RECORD: {
+            if (processDown) {
+                log_amx("[KTP HLTV] HLTV process is DOWN — cannot record %s", demoName);
+                client_print(0, print_chat, "[KTP HLTV] ERROR: HLTV is not running — recording disabled for this match");
+                alert_hltv_failure("HLTV process down, demo not recorded");
+                return;
+            }
+            log_amx("[KTP HLTV] HLTV idle confirmed — issuing record %s", demoName);
+            send_record_command_actual(demoName);
+        }
+        case POLL_ACTION_VERIFY_STOPPED: {
+            // Reaching this branch with idle=true means stoprecording took effect.
+            log_amx("[KTP HLTV] Post-stop verify OK: HLTV is idle");
+        }
+    }
+}
+
+// Curl/HTTP layer failure — retry up to budget then give up gracefully.
+stock on_state_failed() {
+    g_pollAttempts++;
+    if (g_pollAttempts < POLL_MAX_ATTEMPTS) {
+        log_amx("[KTP HLTV] State poll transport failed (attempt %d/%d), retrying in %.1fs",
+            g_pollAttempts, POLL_MAX_ATTEMPTS, POLL_INTERVAL);
+        set_task(POLL_INTERVAL, "task_poll_retry", TASK_POLL_RETRY);
+        return;
+    }
+
+    log_amx("[KTP HLTV] State poll failed after %d attempts — proceeding without idle confirmation", POLL_MAX_ATTEMPTS);
+    alert_hltv_failure("HLTV state API unreachable — recording may bleed");
+
+    g_pollActive = false;
+    new action = g_pollAction;
+    new demoName[128];
+    copy(demoName, charsmax(demoName), g_pollDemoName);
+    g_pollAction = POLL_ACTION_NONE;
+    g_pollDemoName[0] = EOS;
+
+    // Best-effort fallback: fire record anyway. v1.5.x semantics for the
+    // unreachable-API case (no worse than current behavior).
+    if (action == POLL_ACTION_RECORD && demoName[0]) {
+        log_amx("[KTP HLTV] Best-effort record (state unknown): %s", demoName);
+        send_record_command_actual(demoName);
+    }
+}
+
+// Begin the recording flow. v1.6.0+: polls /state until HLTV is idle BEFORE
+// issuing record, so the previous match's stoprecording has actually settled
+// and HLTV won't silently ignore the new basename.
 stock start_recording() {
     if (!g_pendingDemoName[0]) {
         log_amx("[KTP HLTV] ERROR: No pending demo name for recording");
         return;
-    }
-
-    new halfStr[16];
-    if (g_pendingHalf <= 2) {
-        formatex(halfStr, charsmax(halfStr), "half=%d", g_pendingHalf);
-    } else {
-        formatex(halfStr, charsmax(halfStr), "OT%d", g_pendingHalf - 100);
     }
 
     if (!g_hltvApiUrl[0]) {
@@ -399,22 +637,41 @@ stock start_recording() {
         return;
     }
 
-    // Save demo name for callback chat notification
-    copy(g_lastRecordDemoName, charsmax(g_lastRecordDemoName), g_pendingDemoName);
+    // Hand off to the poll-then-record state machine. It owns g_pollDemoName
+    // and will issue the actual `record` command once HLTV is confirmed idle.
+    new demoName[128];
+    copy(demoName, charsmax(demoName), g_pendingDemoName);
 
-    // Build record command
+    // Clear the start_recording-side pending state — poll machine has its own
+    g_pendingDemoName[0] = EOS;
+    g_pendingMatchId[0] = EOS;
+
+    poll_idle_then_record(demoName);
+}
+
+// Issue the record command. Called from on_state_idle() after polling confirms
+// HLTV is not currently writing to a demo file. Also schedules a post-record
+// verification poll to surface basename-bleed in real time.
+stock send_record_command_actual(const demoName[]) {
+    new halfStr[16];
+    if (g_pendingHalf <= 2) {
+        formatex(halfStr, charsmax(halfStr), "half=%d", g_pendingHalf);
+    } else {
+        formatex(halfStr, charsmax(halfStr), "OT%d", g_pendingHalf - 100);
+    }
+
+    // Save demo name for callback chat notification + post-record verify
+    copy(g_lastRecordDemoName, charsmax(g_lastRecordDemoName), demoName);
+
     new command[256];
-    formatex(command, charsmax(command), "record %s", g_pendingDemoName);
+    formatex(command, charsmax(command), "record %s", demoName);
 
-    // Build URL
     new url[256];
     formatex(url, charsmax(url), "%s/hltv/%d/command", g_hltvApiUrl, g_hltvPort);
 
-    // Build JSON payload
     new payload[512];
     formatex(payload, charsmax(payload), "{^"command^":^"%s^"}", command);
 
-    // Create cURL handle
     new CURL:curl = curl_easy_init();
     if (!curl) {
         log_amx("[KTP HLTV] ERROR: curl_easy_init() failed for record");
@@ -425,20 +682,19 @@ stock start_recording() {
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
     curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, payload);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8);  // API sleeps 2s to verify, so allow extra time
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8);
 
     log_amx("[KTP HLTV] Sending record command: %s", payload);
-    log_amx("[KTP HLTV] Recording: %s.dem (match_id=%s %s)", g_pendingDemoName, g_pendingMatchId, halfStr);
+    log_amx("[KTP HLTV] Recording: %s.dem (%s)", demoName, halfStr);
 
-    // Use dedicated callback that reports to chat
     curl_easy_perform(curl, "hltv_record_callback");
-
-    // Clear pending state
-    g_pendingDemoName[0] = EOS;
-    g_pendingMatchId[0] = EOS;
 }
 
-// Callback for record command — reports result to in-game chat
+// Callback for record command — reports result to in-game chat.
+// v1.6.0: HTTP 200 means the API delivered the command to HLTV's FIFO; it does
+// NOT mean HLTV actually started a new recording. Schedule a post-record
+// verification poll so we surface bleed (HLTV ignored the command and is
+// still recording the OLD basename) to players + Discord in real time.
 public hltv_record_callback(CURL:curl, CURLcode:code) {
     if (code != CURLE_OK) {
         new error[128];
@@ -456,16 +712,16 @@ public hltv_record_callback(CURL:curl, CURLcode:code) {
     curl_easy_cleanup(curl);
 
     if (httpCode == 200) {
-        // API confirmed demo file was created
-        log_amx("[KTP HLTV] Recording confirmed (HTTP 200): %s", g_lastRecordDemoName);
-        client_print(0, print_chat, "[KTP HLTV] Recording: %s", g_lastRecordDemoName);
+        log_amx("[KTP HLTV] Record command accepted by API (HTTP 200): %s", g_lastRecordDemoName);
+        // Schedule post-record verification — confirms HLTV is actually recording
+        // the basename we asked for, not bleeding to a previous match's name.
+        remove_task(TASK_VERIFY_RECORDING_STARTED);
+        set_task(VERIFY_STOPPED_DELAY, "task_verify_recording_started", TASK_VERIFY_RECORDING_STARTED);
     } else if (httpCode == 422) {
-        // API sent command but demo file was NOT created
         log_amx("[KTP HLTV] Recording NOT confirmed (HTTP 422): %s", g_lastRecordDemoName);
         client_print(0, print_chat, "[KTP HLTV] ERROR: Recording failed for %s - demo file not created", g_lastRecordDemoName);
         alert_hltv_failure("HLTV rejected record command (demo file not created)");
     } else {
-        // Other HTTP error
         log_amx("[KTP HLTV] Record command HTTP error: %d", httpCode);
         client_print(0, print_chat, "[KTP HLTV] ERROR: Recording may have failed (HTTP %d)", httpCode);
 
@@ -473,6 +729,78 @@ public hltv_record_callback(CURL:curl, CURLcode:code) {
         formatex(msg, charsmax(msg), "HLTV API returned HTTP %d for record command", httpCode);
         alert_hltv_failure(msg);
     }
+}
+
+// Post-record verification: confirm HLTV is actually recording the basename
+// we asked for. Runs ~3s after `record` to allow HLTV to log its first
+// "Start recording to ..." or "Already recording to ..." entry.
+public task_verify_recording_started(taskid) {
+    if (!g_lastRecordDemoName[0]) return;
+
+    if (!g_hltvApiUrl[0]) return;
+
+    new url[256];
+    formatex(url, charsmax(url), "%s/hltv/%d/state", g_hltvApiUrl, g_hltvPort);
+
+    new CURL:curl = curl_easy_init();
+    if (!curl) return;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, g_curlHeaders);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3);
+    curl_easy_perform(curl, "verify_recording_callback");
+}
+
+public verify_recording_callback(CURL:curl, CURLcode:code) {
+    if (code != CURLE_OK) {
+        // Transport failure — silent; the next match will re-verify.
+        curl_easy_cleanup(curl);
+        return;
+    }
+
+    new httpCode;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode);
+    new body[512];
+    curl_get_response_body(curl, body, charsmax(body));
+    curl_easy_cleanup(curl);
+
+    if (httpCode != 200) return;
+
+    new bool:recording = (contain(body, "^"recording^": true") != -1);
+    new bool:alreadyRecording = (contain(body, "^"already_recording_warning^": true") != -1);
+    new currentBase[128];
+    extract_state_basename(body, currentBase, charsmax(currentBase));
+
+    if (!recording) {
+        // We issued record + got HTTP 200 but HLTV is NOT recording. This is
+        // the silent-failure case — HLTV ignored the command or process died.
+        log_amx("[KTP HLTV] VERIFY FAIL: record sent for '%s' but HLTV reports not recording", g_lastRecordDemoName);
+        client_print(0, print_chat, "[KTP HLTV] WARNING: Recording NOT active for %s - admin notified", g_lastRecordDemoName);
+        new msg[256];
+        formatex(msg, charsmax(msg), "Recording verification FAILED — HLTV reports idle after `record %s`", g_lastRecordDemoName);
+        alert_hltv_failure(msg);
+        return;
+    }
+
+    if (alreadyRecording || (currentBase[0] && !equal(currentBase, g_lastRecordDemoName))) {
+        // Bleed signal: HLTV is recording but with the WRONG basename.
+        // Either it's still recording the previous match's basename, or our
+        // record command was silently ignored.
+        log_amx("[KTP HLTV] VERIFY FAIL: requested '%s' but HLTV recording '%s' (already_recording=%d)",
+            g_lastRecordDemoName, currentBase, alreadyRecording);
+        client_print(0, print_chat, "[KTP HLTV] WARNING: Demo bleed detected - recording is %s instead of %s. Admin notified.",
+            currentBase, g_lastRecordDemoName);
+        new msg[384];
+        formatex(msg, charsmax(msg), "Demo bleed: requested `record %s`, HLTV is recording `%s`",
+            g_lastRecordDemoName, currentBase);
+        alert_hltv_failure(msg);
+        return;
+    }
+
+    // Verified: HLTV is recording the correct basename.
+    log_amx("[KTP HLTV] Recording verified: %s", g_lastRecordDemoName);
+    client_print(0, print_chat, "[KTP HLTV] Recording: %s", g_lastRecordDemoName);
 }
 
 // Alert about HLTV failure via Discord and chat
@@ -510,7 +838,9 @@ public ktp_match_end(const matchId[], const map[], MatchType:matchType, team1Sco
     g_currentMatchId[0] = EOS;
 }
 
-// Delayed stop task - fires g_hltvStopDelay seconds after match end
+// Delayed stop task - fires g_hltvStopDelay seconds after match end.
+// v1.6.0: schedules a verify-stopped poll a few seconds later to confirm
+// HLTV actually transitioned to idle (alerts if not — HLTV stuck/dead).
 public task_delayed_match_stop() {
     // Guard: if a new match started before this fires, don't kill the new recording
     if (g_matchActive) {
@@ -521,6 +851,19 @@ public task_delayed_match_stop() {
     log_amx("[KTP HLTV] Delayed stop firing - sending stoprecording (buffer drain complete)");
     send_hltv_command("stoprecording");
     set_localinfo("_ktp_hltv_pending_stop", "");
+
+    // Schedule verify-stopped a few seconds out (no concurrent record op
+    // since g_matchActive is false here).
+    set_task(VERIFY_STOPPED_DELAY, "task_verify_post_deferred_stop", TASK_VERIFY_POST_STOP);
+}
+
+public task_verify_post_deferred_stop(taskid) {
+    if (g_matchActive) {
+        // A new match started during the delay window — verify is moot;
+        // the new match's poll_idle_then_record will own correctness.
+        return;
+    }
+    poll_verify_stopped();
 }
 
 // Load configuration from hltv_recorder.ini
