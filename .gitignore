@@ -15,3 +15,8 @@ compiled/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Python test artifacts
+__pycache__/
+*.pyc
+.pytest_cache/

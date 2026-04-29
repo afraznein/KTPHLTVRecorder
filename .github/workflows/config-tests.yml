@@ -1,0 +1,44 @@
+# KTP Tier 1 — config-parse tests (per-plugin)
+#
+# Validates the in-repo schema of `documents/hltv_recorder.ini.example`.
+# Sister to KTPInfrastructure's central test against the deployed
+# config/online/hltv_recorder.ini — this guards the template at source.
+
+name: config tests
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'documents/*.ini.example'
+      - 'tests/config_parse/**'
+      - '.github/workflows/config-tests.yml'
+  pull_request:
+    paths:
+      - 'documents/*.ini.example'
+      - 'tests/config_parse/**'
+      - '.github/workflows/config-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  config-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest
+        run: pip install --quiet pytest
+
+      - name: Run config-parse tests
+        run: pytest tests/config_parse/ -v
