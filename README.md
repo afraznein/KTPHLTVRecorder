@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.6.0** - Automatic HLTV demo recording for KTP competitive matches.
+**Version 1.7.0** - Match-window logger for the always-on HLTV recording pipeline.
 
 ## Overview
 

@@ -2,6 +2,67 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.7.0] - 2026-04-29
+
+Architectural rewrite. Recording responsibility moves from the plugin to HLTV
+itself; the plugin becomes a match-window logger plus the `.hltvrestart`
+admin command.
+
+### Why
+The 1.6.0 polling-before-record fix turned out to be unable to fully address
+the bleed bug: HLTV processes `record` commands one per source-reconnect
+cycle and holds a sticky basename for that connection's lifetime. Per-match
+record commands therefore collide with the in-flight basename regardless of
+how cleverly the plugin polls. Removing per-match commands eliminates the
+class of bug entirely.
+
+### Changed
+- **Recording now driven by HLTV's own cfg** — each HLTV instance is configured
+  with `record auto_<friendly>` (e.g., `record auto_ny2`) so HLTV is always
+  recording and auto-rotates per source-reconnect with port-stamped
+  filenames like `auto_ny2-2604291902-dod_anzio.dem`.
+- **Plugin role narrowed** — no longer issues `record` / `stoprecording`
+  commands. Emits structured `[KTP HLTV] MATCH_WINDOW_OPEN` / `MATCH_WINDOW_CLOSE`
+  log lines instead. The new `hltv-demo-renamer` service (Phase 1c) reads
+  these and renames the auto-* segments to the canonical
+  `<type>_<matchid>_<half>_<map>.dem` format. The existing 4 AM
+  `ktp-organize-hltv-demos.sh` then sorts them into per-friendly subfolders
+  for the public demo portal.
+- **Plugin shrinks from 1118 to ~290 lines.** Stripped: poll-idle state machine,
+  verify-after-record, delayed-stop, bleed-detection alerts, all task IDs,
+  and persistent localinfo coordination.
+
+### Added
+- **Verified match-start chat** — async `GET /hltv/<port>/state` on
+  `ktp_match_start` confirms HLTV is alive and recording before the plugin
+  promises players a specific demo name. Failure modes get explicit warnings
+  ("HLTV API unreachable…", "HLTV %d is offline…", "HLTV %d is up but not
+  recording…") instead of misleading promises.
+- **Portal-aware match-start / match-end chat** — verified-success path
+  prints the demo glob (`<type>_<matchid>-<friendly>_h<half>-*.dem`) plus the
+  per-friendly portal URL (`http://74.91.112.242/demos/<friendly>/<type>/`).
+  Match-end announcement points at the same portal directory and notes the
+  4 AM ET sort cadence so players know when to expect availability.
+- **`hltv_friendly` config field** — UPPERCASE fleet alias (e.g., `ATL1`).
+  Required for accurate chat announcements; the demo glob and portal URL
+  fall back to a generic form if unset (with a warning at config load).
+
+### Removed
+- All per-match HLTV control commands. The plugin no longer drives recording
+  in any form — by design.
+- `hltv_stop_delay` configuration field is now ignored (left in config files
+  for back-compat during rollout; operators can remove on next config touch).
+
+### Notes
+- **Hard prerequisites for activation:**
+  1. Phase 1a — every HLTV instance config must have `record auto_<friendly>`.
+  2. Phase 1c — `hltv-demo-renamer` service deployed on the data server.
+  Activating the plugin without these in place loses recordings (HLTV won't
+  be recording auto-segments) and produces unprocessed `auto_*.dem` files.
+- Activates at next nightly restart (~03:00 ET) per the standard `.new` swap.
+
+---
+
 ## [1.6.0] - 2026-04-28
 
 ### Fixed

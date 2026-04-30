@@ -20,7 +20,16 @@ hltv_api_key = your-api-key-here
 ;   etc.
 hltv_port = 27020
 
-; Delay (seconds) before sending stoprecording after match end
-; Allows the HLTV delay buffer (~60s) to fully drain before closing the demo
-; Must be greater than HLTV delay setting (default 60s). Minimum 10, maximum 300.
-hltv_stop_delay = 75
+; Fleet-friendly alias (UPPERCASE) — drives the portal URL hint shown in
+; match-start chat and the demo glob the renamer service produces.
+; Must match the directory name under http://74.91.112.242/demos/<X>/.
+; Mapping (added v1.7.0):
+;   Atlanta:   ATL1..ATL5
+;   Dallas:    DAL1..DAL5
+;   Denver:    DEN1..DEN5
+;   New York:  NY1..NY5
+;   Chicago:   CHI1..CHI4   (CHI5 disabled)
+hltv_friendly = ATL1
+
+; (legacy; ignored in v1.7.0+ — recording is driven by HLTV cfg, not this plugin)
+;hltv_stop_delay = 75
