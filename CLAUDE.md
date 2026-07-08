@@ -21,7 +21,7 @@ This will:
 - `.github/workflows/smoke.yml` - Tier 1 build-time smoke (calls KTPInfrastructure's reusable workflow)
 
 ## Purpose
-Hooks `ktp_match_start` / `ktp_match_end` from KTPMatchHandler and drives HLTV demo recording via the data server's HLTV control HTTP API. One game server pairs 1:1 with one HLTV proxy instance; the plugin POSTs `record` / `stoprecording` commands keyed on the configured `hltv_port`.
+Hooks `ktp_match_start` / `ktp_match_end` from KTPMatchHandler and emits structured `MATCH_WINDOW_OPEN` / `MATCH_WINDOW_CLOSE` log lines that the data server's `hltv-demo-renamer` service uses to name demos post-match. Since v1.7.0 the plugin does **not** drive recording — HLTV instances record always-on via `record auto_<friendly>` in their own config. One game server pairs 1:1 with one HLTV proxy instance; the HTTP API is used only for the `.hltvrestart` admin command and the match-start `/state` health check (warn-only — the plugin never restarts or recovers HLTV on its own).
 
 ## Dependencies
 - **KTPMatchHandler v0.10.4+** — provides `ktp_match_start` and `ktp_match_end` forwards
@@ -31,38 +31,38 @@ Hooks `ktp_match_start` / `ktp_match_end` from KTPMatchHandler and drives HLTV d
 ## Configuration
 Per-server config at `addons/ktpamx/configs/hltv_recorder.ini`:
 ```ini
-hltv_enabled = 1
+hltv_enabled = 1                  ; gates chat announcements + health check; log lines emit regardless
 hltv_api_url = http://<data-server>:8087
 hltv_api_key = <your-api-key>
-hltv_port = <paired-hltv-port>
+hltv_port = <paired-hltv-port>    ; logged for the renamer
+hltv_friendly = <UPPER-alias>     ; e.g. ATL1 — drives chat demo glob + portal URL
 ```
+`hltv_stop_delay` is a legacy field, ignored since v1.7.0.
 
 Each game server needs its own config with its paired HLTV port. The HLTV port mapping is documented in `KTP Git Projects/CLAUDE.md` under "Current Servers" (game ports 27015-27019, HLTV ports 27020-27044 across the fleet).
 
-## HLTV Control Architecture
+## Recording Architecture (v1.7.0+)
 ```
-Game Server Plugin --HTTP POST--> HLTV API (data server :8087) --FIFO pipe--> HLTV Instance
+HLTV cfg (record auto_<friendly>) ------> HLTV Instance (always recording, auto-rotates per source-reconnect)
+Game Server Plugin --amxx log lines--> hltv-demo-renamer (data server) --rename--> demo portal
+Game Server Plugin --HTTP POST------> HLTV API (data server :8087) --FIFO pipe--> HLTV Instance  (.hltvrestart + /state health check only)
 ```
 
-The HLTV API service, FIFO pipes, and HLTV wrapper script all live on the data server. See `KTPInfrastructure/docs/TECHNICAL_GUIDE.md` for the implementation-side details (paths, systemd units, auth setup).
+Recording is always-on: each HLTV instance's cfg carries `record auto_<friendly>` at boot, so HLTV records continuously and rotates segments on source-reconnect. The plugin never sends `record`/`stoprecording` — per the 2026-04-29 investigation, HLTV processes record commands one-per-source-reconnect with a sticky basename, so per-match commands caused cross-match bleed no matter how the plugin polled (see CHANGELOG 1.6.0/1.7.0).
 
-## Recording Lifecycle (v1.5.0+)
-HLTV has a ~60s delay buffer. Naive `stoprecording` on map change kills the buffer mid-flight and loses ~47s of gameplay. The current flow avoids that:
+The plugin's job per match:
+1. `ktp_match_start` → log `[KTP HLTV] MATCH_WINDOW_OPEN match_id=... half=... match_type=... map=... hltv_port=... wall_time=...`
+2. If `hltv_enabled`: async `GET /hltv/<port>/state` health check, then chat — either the expected demo glob + portal URL, or an explicit warning (API unreachable / HLTV offline / not recording). **Warn-only**: the health check never restarts or recovers anything.
+3. `ktp_match_end` → log `MATCH_WINDOW_CLOSE` with score; chat points players at the portal.
 
-1. **Half 1 start** (`ktp_match_start`, half=1) → `record <type>_<matchid>_h1`
-2. **Half 1 end (map change)** → no-op; HLTV keeps recording, buffer drains naturally
-3. **Half 2 start** (`ktp_match_start`, half=2) → `stoprecording` (safe; buffer drained), then `record <type>_<matchid>_h2`
-4. **Match end** (`ktp_match_end`) → schedules delayed `stoprecording` after `hltv_stop_delay` seconds (default 75)
-5. **Edge: map changes before delayed stop fires** → `plugin_cfg()` detects `_ktp_hltv_pending_stop` localinfo and sends `stoprecording`
+The `MATCH_WINDOW_*` lines are the renamer's input contract — emitted regardless of `hltv_enabled`, format must stay stable (renamer parses with regexes; matchtype regex is lowercase-only).
 
-**Trade-off:** half-1 demo includes ~60s of half-2 warmup at the end. All actual match gameplay is captured fully.
+The HLTV API service, FIFO pipes, HLTV wrapper script, and renamer all live on the data server. See `KTPInfrastructure/docs/TECHNICAL_GUIDE.md` for the implementation-side details (paths, systemd units, auth setup).
 
-## v1.6.0 — record-while-recording bleed fix
-HLTV silently ignored `record` if already recording. Result: half-2 commands could land on a still-active half-1 stream and bleed across matches. v1.6.0 polls the HLTV API's `/state` endpoint to confirm idle before issuing `record`. See `CHANGELOG.md` for the full audit + fix.
-
-## Demo Naming
-Format: `<matchtype>_<matchid>_<half>.dem` (matchId already contains map name).
-Examples: `ktp_KTP-1735052400-dod_anzio_h1.dem`, `scrim_KTP-1735052400-dod_flash_h2.dem`, `ktpOT_KTP-1735052400-dod_anzio_ot1.dem`.
+## Demo Naming (renamer output)
+HLTV writes `auto_<friendly>-<hltv_ts>-<map>.dem` segments; the renamer matches them to logged match windows and renames to:
+`<matchtype>_<match_id>-<UPPER_FRIENDLY>_<half>-<hltv_ts>-<map>.dem`
+Example: `ktp_1777070040-ATL1_h1-2604241856-dod_lennon5_b1.dem`. Match-type prefixes are lowercase (`ktp_`, `scrim_`, `12man_`, `draft_`, `ktpot_`, `draftot_`); halves `h1`/`h2`, OT rounds `ot1`+. The 4 AM ET organizer then sorts renamed demos into per-friendly portal directories.
 
 ## Admin Commands
 - **`.hltvrestart`** — restart paired HLTV instance via the API (ADMIN_RCON, sends Discord audit notification). Useful when HLTV disconnects or gets stuck.

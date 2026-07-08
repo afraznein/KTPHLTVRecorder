@@ -1,21 +1,18 @@
 # KTPHLTVRecorder
 
-**Version 1.7.0** - Match-window logger for the always-on HLTV recording pipeline.
+**Version 1.7.1** - Match-window logger for the always-on HLTV recording pipeline.
 
 ## Overview
 
-KTPHLTVRecorder hooks into [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) match events and automatically controls HLTV demo recording via HTTP API. When a match starts, recording begins. When it ends, recording stops.
+Since v1.7.0, HLTV instances record **always-on** via their own config (`record auto_<friendly>` at HLTV boot) — this plugin does not start or stop recording. Instead it hooks [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) match events and emits structured `MATCH_WINDOW_OPEN` / `MATCH_WINDOW_CLOSE` log lines. The `hltv-demo-renamer` service on the data server reads those windows and renames HLTV's `auto_*` demo segments to canonical match filenames post-match.
 
 ## Features
 
-- Automatic recording for all match types (`.ktp`, `.scrim`, `.draft`, `.12man`, `.ktpOT`, `.draftOT`)
+- Match-window logging for all match types (`.ktp`, `.scrim`, `.draft`, `.12man`, `.ktpOT`, `.draftOT`) — the renamer's input contract
 - 1:1 game server to HLTV pairing
-- Descriptive demo naming: `<type>_<matchid>_<half>.dem` (matchId includes map)
-- HTTP API communication with HLTV control service
-- **Pre-match HLTV health check** - Verifies HLTV API before recording, auto-recovery on failure
-- **Discord + chat alerts** - Notifies admins when HLTV recording fails
-- **Admin HLTV restart command** - `.hltvrestart` or `/hltvrestart` to restart paired HLTV instance
-- **Admin version display** - Shows plugin version to admins on connect (5 second delay)
+- **Match-start health check** - Async `GET /hltv/<port>/state`; warns in chat if HLTV is unreachable, offline, or not recording. Warn-only: it never restarts or recovers anything on its own
+- **Recording announcements** - Verified match-start chat with the expected demo glob + portal URL; match-end chat pointing at the portal
+- **Admin HLTV restart command** - `.hltvrestart` or `/hltvrestart` to restart the paired HLTV instance (HTTP POST with X-Auth-Key, Discord audit)
 
 ## Requirements
 
@@ -23,7 +20,8 @@ KTPHLTVRecorder hooks into [KTPMatchHandler](https://github.com/afraznein/KTPMat
 - AMX Mod X Curl module
 - [ktp_discord.inc](https://github.com/afraznein/KTPMatchHandler) - Shared Discord library (for audit notifications)
 - HLTV API service running on data server
-- Paired HLTV instance per game server
+- Paired HLTV instance per game server, with `record auto_<friendly>` in its config (the actual recording trigger)
+- `hltv-demo-renamer` service on the data server (produces the canonical filenames)
 
 ## Installation
 
@@ -39,16 +37,18 @@ hltv_enabled = 1
 hltv_api_url = http://74.91.112.242:8087
 hltv_api_key = your-api-key-here
 hltv_port = 27020
-hltv_stop_delay = 75
+hltv_friendly = ATL1
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `hltv_enabled` | `0` | Enable/disable recording (1/0) |
-| `hltv_api_url` | | HLTV API base URL |
-| `hltv_api_key` | | API authentication key |
-| `hltv_port` | `27020` | Paired HLTV instance port |
-| `hltv_stop_delay` | `75` | Seconds to wait after match end before sending stoprecording (10-300). Must exceed HLTV delay setting. |
+| `hltv_enabled` | `0` | Gates chat announcements + the match-start health check (1/0). Match-window log lines are emitted regardless |
+| `hltv_api_url` | | HLTV API base URL (used by `.hltvrestart` + health check) |
+| `hltv_api_key` | | API authentication key (X-Auth-Key header) |
+| `hltv_port` | `27020` | Paired HLTV instance port (logged for the renamer) |
+| `hltv_friendly` | | UPPERCASE fleet alias (e.g. `ATL1`) — drives the demo glob and portal URL in chat. Generic fallback if unset |
+
+`hltv_stop_delay` is a legacy field — ignored since v1.7.0, safe to remove from existing configs.
 
 Each game server needs its own config with its paired HLTV port:
 
@@ -60,35 +60,30 @@ Each game server needs its own config with its paired HLTV port:
 
 ## Demo Naming
 
-Format: `<matchtype>_<matchid>_<half>.dem`
+HLTV records `auto_<friendly>-<hltv_ts>-<map>.dem` segments continuously (one per source-reconnect). The renamer matches segments to match windows and produces:
 
-Each half gets its own demo file. The matchId already contains the map name (e.g., `KTP-1735052400-dod_anzio`).
+`<matchtype>_<match_id>-<UPPER_FRIENDLY>_<half>-<hltv_ts>-<map>.dem`
 
-| Match Type | Half | Example Demo Name |
-|------------|------|-------------------|
-| `.ktp`     | 1st  | `ktp_KTP-1735052400-dod_anzio_h1.dem` |
-| `.ktp`     | 2nd  | `ktp_KTP-1735052400-dod_anzio_h2.dem` |
-| `.scrim`   | 1st  | `scrim_KTP-1735052400-dod_flash_h1.dem` |
-| `.draft`   | 1st  | `draft_KTP-1735052400-dod_avalanche_h1.dem` |
-| `.12man`   | 1st  | `12man_KTP-1735052400-dod_caen_h1.dem` |
-| `.ktpOT`   | OT1  | `ktpOT_KTP-1735052400-dod_anzio_ot1.dem` |
-| `.ktpOT`   | OT2  | `ktpOT_KTP-1735052400-dod_anzio_ot2.dem` |
+e.g. `ktp_1777070040-ATL1_h1-2604241856-dod_lennon5_b1.dem`. Halves are `h1`/`h2`, overtime rounds `ot1`/`ot2`/... Match types are lowercase prefixes: `ktp_`, `scrim_`, `12man_`, `draft_`, `ktpot_`, `draftot_`.
+
+The plugin can't predict `<hltv_ts>` at match start, so chat announces a glob keyed on the known parts (`<type>_<matchid>-<FRIENDLY>_<half>-*.dem`) plus the portal URL. The 4 AM ET organizer sorts renamed demos into per-friendly portal directories.
 
 ## How It Works
 
-1. Plugin registers handlers for `ktp_match_start` and `ktp_match_end` forwards
-2. On half 1 start: sends `record <demoname>` via HTTP POST to HLTV API
-3. On map change (half transition): does **nothing** — HLTV keeps recording, delay buffer drains naturally
-4. On half 2+ start: sends `stoprecording` (buffer drained, safe), then `record <new_demoname>`
-5. On match end: schedules delayed `stoprecording` (default 75s) to let buffer drain
-6. HLTV saves each half as a separate demo file
+1. HLTV instances are always recording — `record auto_<friendly>` in each HLTV config at boot. The plugin never sends record/stop commands
+2. On `ktp_match_start`: plugin logs `[KTP HLTV] MATCH_WINDOW_OPEN match_id=... half=... match_type=... map=... hltv_port=... wall_time=...`
+3. Still at match start (if `hltv_enabled`): async `/state` health check — success announces the expected demo glob + portal URL in chat; failure prints an explicit warning (API unreachable / HLTV offline / not recording). Warn-only — no recovery is attempted
+4. On `ktp_match_end`: plugin logs `MATCH_WINDOW_CLOSE` with the final score and announces the portal location in chat
+5. The `hltv-demo-renamer` service tails the amxx logs, associates `auto_*` segments with match windows, and renames them to canonical filenames within ~30s of match end
 
-**Why delayed stop?** HLTV has a ~60 second delay buffer. Sending `stoprecording` immediately discards unwritten buffer content, losing ~47 seconds of gameplay. The delayed approach ensures all content is written before the demo is closed.
+Both `MATCH_WINDOW_*` lines are emitted regardless of `hltv_enabled` — they are the renamer's input contract and their format must stay stable.
 
 ## Architecture
 
 ```
-Game Server Plugin --HTTP POST--> HLTV API (8087) --FIFO--> HLTV Instance
+HLTV cfg (record auto_*) ---------> HLTV Instance (always recording)
+Game Server Plugin --amxx log--> hltv-demo-renamer (data server) --rename--> portal
+Game Server Plugin --HTTP POST--> HLTV API (8087) --FIFO--> HLTV Instance   (.hltvrestart + /state only)
 ```
 
 ## Building

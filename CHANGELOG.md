@@ -2,6 +2,43 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.7.1] - 2026-07-08
+
+Docs-truth release plus four small code fixes from the 2026-07-06 wave-2
+assessment (HR-1 through HR-4). No behavior change to the match-window
+logging contract; forward signatures untouched.
+
+### Fixed
+- **`say_team /hltvrestart` now registered** — the other three prefix/say
+  combinations (`say .hltvrestart`, `say_team .hltvrestart`,
+  `say /hltvrestart`) were registered but the fourth was missing, so the
+  command silently did nothing when typed with `/` in team chat.
+- **MatchType enum comment corrected** — listed mixed-case `ktpOT_`/`draftOT_`
+  renamer prefixes, contradicting the lowercase mandate (and the actual
+  lowercase output of `match_type_string`). Prefixes are `ktpot_`/`draftot_`.
+- **Empty-api-key warning now states the consequence** — an unset
+  `hltv_api_key` at boot means the curl header list is never built, so any
+  API request that still fires goes out unauthenticated until a restart.
+  The log line says so instead of just ".hltvrestart will fail".
+
+### Removed
+- **Dead `g_currentMatchId` global** — written on match start, cleared on
+  match end, never read (log lines use the forward's `matchId` parameter
+  directly). Leftover from the pre-1.7.0 control-flow state.
+
+### Docs
+- **README.md + CLAUDE.md rewritten to the 1.7.0 architecture** — both still
+  described the retired record/stop design (plugin-issued `record` /
+  `stoprecording` commands, `<type>_<matchid>_<half>.dem` naming by the
+  plugin, delayed-stop lifecycle, `hltv_stop_delay`). They now describe the
+  always-on model: HLTV records via its own cfg (`record auto_<friendly>`),
+  the plugin logs MATCH_WINDOW_OPEN/CLOSE for the data-server renamer, the
+  match-start health check warns only (never recovers), and `.hltvrestart`
+  is the sole HTTP control path. Config docs gain `hltv_friendly` and mark
+  `hltv_stop_delay` as ignored.
+
+---
+
 ## [1.7.0] - 2026-04-29
 
 Architectural rewrite. Recording responsibility moves from the plugin to HLTV

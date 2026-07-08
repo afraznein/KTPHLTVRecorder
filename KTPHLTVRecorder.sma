@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.7.0
+/* KTP HLTV Recorder v1.7.1
  * Match window logger (Phase F+A architecture)
  *
  * AUTHOR: Nein_
- * VERSION: 1.7.0
- * DATE: 2026-04-29
+ * VERSION: 1.7.1
+ * DATE: 2026-07-08
  *
  * DESCRIPTION:
  * In v1.7.0 the recording-control responsibility moves from this plugin to
@@ -16,9 +16,10 @@
  * What this plugin does in v1.7.0:
  *   - Emits structured MATCH_WINDOW_OPEN / MATCH_WINDOW_CLOSE log lines on
  *     ktp_match_start / ktp_match_end. The hltv-demo-renamer service reads
- *     these to associate HLTV's auto-* demo segments with match_ids and
- *     rename them to the canonical `<type>_<matchid>_h<half>_<map>.dem`
- *     format post-match.
+ *     these to associate HLTV's auto_* demo segments with match_ids and
+ *     rename them post-match to
+ *     `<matchtype>_<match_id>-<UPPER_FRIENDLY>_<half>-<hltv_ts>-<map>.dem`
+ *     (the same format build_expected_demo_glob announces in chat).
  *   - Provides the `.hltvrestart` admin command (unchanged from v1.6.0).
  *
  * What this plugin no longer does (intentional):
@@ -34,12 +35,14 @@
  *     doesn't issue per-match record commands.
  *
  * REQUIREMENTS:
- * - KTPMatchHandler v0.10.1+ (for ktp_match_start / ktp_match_end forwards)
+ * - KTPMatchHandler v0.10.4+ (for ktp_match_start / ktp_match_end forwards)
  * - Curl module (for the `.hltvrestart` admin command)
  * - Each HLTV instance's cfg must have `record auto_<friendly>` (Phase 1a)
  *
  * CONFIGURATION (hltv_recorder.ini):
- *   hltv_enabled  = 1               ; gates the plugin entirely (legacy flag)
+ *   hltv_enabled  = 1               ; gates chat announcements + the health
+ *                                   ; check ONLY — window log lines and
+ *                                   ; .hltvrestart work regardless
  *   hltv_api_url  = http://...:8087  ; used by .hltvrestart + match-start /state
  *   hltv_api_key  = <key>            ; used by .hltvrestart + match-start /state
  *   hltv_port     = 27020            ; paired HLTV port (logged for renamer)
@@ -50,14 +53,17 @@
  * (hltv_stop_delay is ignored in v1.7.0; left in config for back-compat
  * during rollout — operator can remove the line at next config touch.)
  *
- * LOG OUTPUT FORMAT (the renamer's input contract):
- *   [KTP HLTV] MATCH_WINDOW_OPEN  match_id=<id> half=<n> match_type=<t> map=<m> hltv_port=<p> wall_time=<unix>
- *   [KTP HLTV] MATCH_WINDOW_CLOSE match_id=<id>           match_type=<t>           hltv_port=<p> wall_time=<unix> score=<a>-<b>
+ * LOG OUTPUT FORMAT (the renamer's input contract — must match the log_amx
+ * sites in ktp_match_start/ktp_match_end exactly):
+ *   [KTP HLTV] MATCH_WINDOW_OPEN  match_id=<id> half=<h> match_type=<t> map=<m> hltv_port=<p> wall_time=<unix> enabled=<0|1>
+ *   [KTP HLTV] MATCH_WINDOW_CLOSE match_id=<id> match_type=<t> map=<m> hltv_port=<p> wall_time=<unix> score=<a>-<b>
  *
  * Both lines are emitted regardless of `hltv_enabled` value. The renamer
  * reads these from each game server's amxx log via paramiko-tail.
  *
  * CHANGELOG (most recent first; full history in CHANGELOG.md):
+ *   v1.7.1 (2026-07-08): docs-truth release; dead g_currentMatchId removed,
+ *     say_team /hltvrestart registered, comment/log fixes.
  *   v1.7.0 (2026-04-29):
  *     - Removed all record / stoprecording / poll / verify logic.
  *     - HLTV cfg `record auto_<friendly>` is now the recording trigger.
@@ -76,7 +82,7 @@
 #include <ktp_version_reporter>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.7.0"
+#define PLUGIN_VERSION "1.7.1"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -84,8 +90,9 @@
 
 // Match types — mirrors KTPMatchHandler enum (verified against v0.10.121).
 // Used only for the match_type=<str> field in log lines; the renamer maps
-// these to file-prefix conventions (ktp_, scrim_, 12man_, draft_, ktpOT_,
-// draftOT_) when renaming auto-* segments.
+// these to file-prefix conventions (ktp_, scrim_, 12man_, draft_, ktpot_,
+// draftot_) when renaming auto-* segments. Prefixes are lowercase — see
+// match_type_string.
 enum MatchType {
     MATCH_TYPE_COMPETITIVE = 0,
     MATCH_TYPE_SCRIM = 1,
@@ -101,9 +108,6 @@ new g_hltvApiUrl[256];
 new g_hltvApiKey[64];
 new g_hltvPort = 27020;
 new g_hltvFriendly[16];   // UPPER fleet alias (e.g., "ATL1") — see config docs above
-
-// State (kept minimal in v1.7.0 — only for log-line context, not control)
-new g_currentMatchId[64];
 
 // Pending context for the async match-start health-check callback. Set in
 // ktp_match_start, read in hltv_health_check_callback. One match in flight at
@@ -129,6 +133,7 @@ public plugin_init() {
     register_clcmd("say .hltvrestart", "cmd_hltv_restart");
     register_clcmd("say_team .hltvrestart", "cmd_hltv_restart");
     register_clcmd("say /hltvrestart", "cmd_hltv_restart");
+    register_clcmd("say_team /hltvrestart", "cmd_hltv_restart");
 }
 
 public plugin_cfg() {
@@ -150,7 +155,7 @@ stock init_curl_headers() {
         return;
 
     if (!g_hltvApiKey[0]) {
-        log_amx("[KTP HLTV] WARNING: hltv_api_key not configured — .hltvrestart will fail");
+        log_amx("[KTP HLTV] WARNING: hltv_api_key not configured — API requests will be unauthenticated until the key is set (config re-read at next map change)");
         return;
     }
 
@@ -168,9 +173,9 @@ stock init_curl_headers() {
 // plugin exposes to the hltv-demo-renamer service. Format MUST stay stable
 // across versions; the renamer parses with `match_id=([^ ]+) ...` regexes.
 
-// IMPORTANT: ktp-organize-hltv-demos.sh's matchtype regex is `[a-z0-9]+`
-// (lowercase only). Mixed-case `ktpOT`/`draftOT` would NOT match and OT
-// demos would never auto-organize. All match types must stay lowercase.
+// IMPORTANT: the renamer and ktp-organize-hltv-demos.sh both parse matchtype
+// with `[a-z0-9]+` (lowercase only). Mixed-case `ktpOT`/`draftOT` would NOT
+// match and OT demos would never auto-organize/rename. Stay lowercase.
 stock match_type_string(MatchType:matchType, output[], maxlen) {
     switch (matchType) {
         case MATCH_TYPE_COMPETITIVE: copy(output, maxlen, "ktp");
@@ -235,8 +240,6 @@ public ktp_match_start(const matchId[], const map[], MatchType:matchType, half) 
         matchId, halfStr, typeStr, map, g_hltvPort, get_systime(), g_hltvEnabled
     );
 
-    copy(g_currentMatchId, charsmax(g_currentMatchId), matchId);
-
     // Player-facing chat — announce the expected post-rename demo glob AFTER
     // verifying HLTV is alive and recording. Stash context for the async
     // /state callback; chat fires from hltv_health_check_callback.
@@ -274,8 +277,6 @@ public ktp_match_end(const matchId[], const map[], MatchType:matchType, team1Sco
                 typeStr, matchId);
         }
     }
-
-    g_currentMatchId[0] = EOS;
 }
 
 // ============================================================================
@@ -436,7 +437,7 @@ stock load_config() {
         server_print("[KTP HLTV] WARNING: hltv_friendly not configured — chat announcements will fall back to a generic glob");
     }
 
-    server_print("[KTP HLTV] Config loaded: api=%s port=%d friendly=%s enabled=%d (v1.7.0 — recording driven by HLTV cfg)",
+    server_print("[KTP HLTV] Config loaded: api=%s port=%d friendly=%s enabled=%d (recording driven by HLTV cfg)",
                  g_hltvApiUrl, g_hltvPort, g_hltvFriendly[0] ? g_hltvFriendly : "<unset>", g_hltvEnabled);
 }
 
