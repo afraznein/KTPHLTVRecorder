@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.7.1
+/* KTP HLTV Recorder v1.7.2
  * Match window logger (Phase F+A architecture)
  *
  * AUTHOR: Nein_
- * VERSION: 1.7.1
- * DATE: 2026-07-08
+ * VERSION: 1.7.2
+ * DATE: 2026-07-13
  *
  * DESCRIPTION:
  * In v1.7.0 the recording-control responsibility moves from this plugin to
@@ -62,6 +62,9 @@
  * reads these from each game server's amxx log via paramiko-tail.
  *
  * CHANGELOG (most recent first; full history in CHANGELOG.md):
+ *   v1.7.2 (2026-07-13): .hltvrestart callback verifies the requester's
+ *     authid before printing — slot indices are recycled, and the 30s curl
+ *     window is long enough for another player to land in the slot.
  *   v1.7.1 (2026-07-08): docs-truth release; dead g_currentMatchId removed,
  *     say_team /hltvrestart registered, comment/log fixes.
  *   v1.7.0 (2026-04-29):
@@ -82,7 +85,7 @@
 #include <ktp_version_reporter>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.7.1"
+#define PLUGIN_VERSION "1.7.2"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -497,8 +500,14 @@ stock send_hltv_restart(requesterId = 0) {
 
     log_amx("[KTP HLTV] Sending restart request to %s", url);
 
-    new data[1];
+    // data[0] = requester slot, data[1..] = requester authid. The 30s curl
+    // window outlives disconnects and map changes, and slots are recycled —
+    // the callback must prove the occupant is still the same person before
+    // printing to that slot.
+    new data[36];
     data[0] = requesterId;
+    if (requesterId > 0)
+        get_user_authid(requesterId, data[1], sizeof(data) - 2);
     curl_easy_perform(curl, "hltv_restart_callback", data, sizeof(data));
 }
 
@@ -526,10 +535,16 @@ public hltv_restart_callback(CURL:curl, CURLcode:code, const data[]) {
     }
 
     if (requesterId > 0 && requesterId <= MAX_PLAYERS && is_user_connected(requesterId)) {
-        if (success) {
-            client_print(requesterId, print_chat, "[KTP HLTV] HLTV on port %d restarted successfully.", g_hltvPort);
-        } else {
-            client_print(requesterId, print_chat, "[KTP HLTV] HLTV restart failed! Check server logs.");
+        // Connected only proves the slot is occupied, not by whom — recheck
+        // the authid captured at request time.
+        new authid[35];
+        get_user_authid(requesterId, authid, charsmax(authid));
+        if (equal(authid, data[1])) {
+            if (success) {
+                client_print(requesterId, print_chat, "[KTP HLTV] HLTV on port %d restarted successfully.", g_hltvPort);
+            } else {
+                client_print(requesterId, print_chat, "[KTP HLTV] HLTV restart failed! Check server logs.");
+            }
         }
     }
 }

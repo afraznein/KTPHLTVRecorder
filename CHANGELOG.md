@@ -2,6 +2,24 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [1.7.2] - 2026-07-13
+
+### Fixed
+- **`.hltvrestart` confirmation could print to the wrong player** — the
+  completion callback carried only the requester's slot index, and the
+  restart request has a 30-second curl timeout. The curl module's per-frame
+  poll keeps running across map changes (extension mode reloads plugins
+  without unloading them), so if the requesting admin disconnected in that
+  window and another player was recycled into the slot,
+  `is_user_connected()` passed and the "restarted successfully" / "restart
+  failed" chat line went to the new occupant. The request payload now also
+  carries the requester's SteamID, and the callback re-resolves the slot and
+  verifies the authid still matches before printing. Cosmetic impact only
+  (a confusing chat line), but the slot-recycling pattern is the sharp edge
+  of the async-callback class, so it's closed properly.
+
+---
+
 ## [1.7.1] - 2026-07-08
 
 Docs-truth release plus four small code fixes from the 2026-07-06 wave-2
