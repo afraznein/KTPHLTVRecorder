@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.7.2
+/* KTP HLTV Recorder v1.7.3
  * Match window logger (Phase F+A architecture)
  *
  * AUTHOR: Nein_
- * VERSION: 1.7.2
- * DATE: 2026-07-13
+ * VERSION: 1.7.3
+ * DATE: 2026-07-18
  *
  * DESCRIPTION:
  * In v1.7.0 the recording-control responsibility moves from this plugin to
@@ -62,6 +62,9 @@
  * reads these from each game server's amxx log via paramiko-tail.
  *
  * CHANGELOG (most recent first; full history in CHANGELOG.md):
+ *   v1.7.3 (2026-07-18): demo-portal chat links repointed from the raw IP to
+ *     https://fastdl.ktpdod.com/demos (HTTPS; ktpdod.com migration). Cosmetic —
+ *     human-clicked browser links, so the FastDL HTTP-only-client caveat doesn't apply.
  *   v1.7.2 (2026-07-13): .hltvrestart callback verifies the requester's
  *     authid before printing — slot indices are recycled, and the 30s curl
  *     window is long enough for another player to land in the slot.
@@ -85,7 +88,7 @@
 #include <ktp_version_reporter>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.7.2"
+#define PLUGIN_VERSION "1.7.3"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -272,11 +275,11 @@ public ktp_match_end(const matchId[], const map[], MatchType:matchType, team1Sco
     if (g_hltvEnabled) {
         if (g_hltvFriendly[0]) {
             client_print(0, print_chat,
-                "[KTP] Match recorded — find %s_%s-%s_*.dem at http://74.91.112.242/demos/%s/%s/ after the next 4 AM ET sort",
+                "[KTP] Match recorded — find %s_%s-%s_*.dem at https://fastdl.ktpdod.com/demos/%s/%s/ after the next 4 AM ET sort",
                 typeStr, matchId, g_hltvFriendly, g_hltvFriendly, typeStr);
         } else {
             client_print(0, print_chat,
-                "[KTP] Match recorded — find %s_%s-*.dem at http://74.91.112.242/demos/ after the next 4 AM ET sort",
+                "[KTP] Match recorded — find %s_%s-*.dem at https://fastdl.ktpdod.com/demos/ after the next 4 AM ET sort",
                 typeStr, matchId);
         }
     }
@@ -374,7 +377,7 @@ public hltv_health_check_callback(CURL:curl, CURLcode:code) {
         log_amx("[KTP HLTV] HLTV up but not recording at match start (port %d)", g_hltvPort);
     } else {
         client_print(0, print_chat,
-            "[KTP] HLTV %s recording: %s  (portal: http://74.91.112.242%s)",
+            "[KTP] HLTV %s recording: %s  (portal: https://fastdl.ktpdod.com%s)",
             g_pendingHalfStr, g_pendingExpectedDemo, g_pendingPortalPath);
     }
 }
