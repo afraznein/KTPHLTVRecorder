@@ -472,7 +472,7 @@ public cmd_hltv_restart(id) {
     formatex(description, charsmax(description),
         "**Admin:** %s (`%s`)^n**HLTV Port:** %d",
         adminName, adminAuth, g_hltvPort);
-    ktp_discord_send_embed_audit("<:ktp:1105490705188659272> HLTV Restart", description, KTP_DISCORD_COLOR_ORANGE);
+    ktp_discord_send_embed_audit("<:KTP:1002382703020212245> HLTV Restart", description, KTP_DISCORD_COLOR_ORANGE);
 
     client_print(id, print_chat, "[KTP HLTV] Restarting HLTV on port %d...", g_hltvPort);
     send_hltv_restart(id);

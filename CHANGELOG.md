@@ -6,6 +6,7 @@ All notable changes to KTPHLTVRecorder will be documented in this file.
 
 ### Changed
 - **Demo-portal chat links repointed to `https://fastdl.ktpdod.com/demos`** (was `http://74.91.112.242/demos`), part of the ktpdod.com domain migration. Three sites: the two "Match recorded — find ... .dem at ..." lines and the `.hltvrestart` "portal: ..." line. These are human-clicked browser links (not a game `sv_downloadurl`), so the FastDL HTTP-only-client caveat does not apply — HTTPS is correct. Verified `https://fastdl.ktpdod.com/demos/` serves (HTTP 200). Cosmetic only; no logic change (the `MATCH_WINDOW_*` renamer contract is untouched).
+- Swapped the dead `<:ktp:…>` Discord emoji token for the current `<:KTP:1002382703020212245>` in the `.hltvrestart` audit embed (the old one renders as raw text since 2026-07-17). Cosmetic; part of the fleet-wide emoji sweep.
 
 ## [1.7.2] - 2026-07-13
 
