@@ -2,6 +2,49 @@
 
 All notable changes to KTPHLTVRecorder will be documented in this file.
 
+## [Unreleased]
+
+### Documentation
+
+Installation step 1 said to copy the plugin to `addons/amxmodx/plugins/`. This
+plugin consumes KTPMatchHandler forwards and KTPAMXX natives, so it only runs on
+the KTP stack — the path is `addons/ktpamx/plugins/`. Step 1 also now builds via
+`compile.sh` and deploys from `compiled/`, matching the rest of the stack.
+
+Same class of error in step 3: the config template was named as bare
+`hltv_recorder.ini.example` (it lives in `documents/`) destined for
+`configs/hltv_recorder.ini`. The plugin resolves its config through
+`get_configsdir()`, so anything outside `addons/ktpamx/configs/` is never read and
+`.hltvrestart` silently stays unavailable. Both paths corrected.
+
+Further corrections, all verified against source:
+
+- **`.hltvrestart` never stated its permission level.** It is ADMIN_RCON
+  (`ADMIN_HLTVRESTART`), enforced in the command handler; repo `CLAUDE.md` had it
+  right and the README was the only doc missing it.
+- **KTPMatchHandler minimum version disagreed** — README said v0.10.1+ while the
+  source header and `CLAUDE.md` both say v0.10.4+. Aligned to 0.10.4+.
+- **Documented the forward coupling as a runtime name contract.** These forwards
+  are matched by name with no compile-time link, and the `MatchType` enum is a
+  local mirror of KTPMatchHandler's. A rename, re-signature, or enum reorder
+  upstream fails silently — demos stop being renamed or get mislabelled, with no
+  build or load error. The rule lived only in the root project doc.
+- **The health-check bullet oversold itself.** Two pre-flight paths skip the
+  check and print the optimistic "recording" announcement anyway: incomplete
+  config (which includes an unset `hltv_api_key`, since that leaves the header
+  list empty) and `curl_easy_init()` failure. The behavior is deliberate; it just
+  wasn't disclosed, so players could be told a match is recording with nothing
+  verified.
+- **`MATCH_WINDOW_OPEN`'s quoted format was missing its `enabled=` field** — and
+  it sits two lines above "their format must stay stable", so a renamer-side
+  parser written to the doc would have been written to the short form.
+- Requirements now list `ktp_version_reporter.inc` / `amx_ktp_versions`; "AMX Mod
+  X Curl module" corrected to the **KTP** AMXX Curl module.
+- Config template's fleet map said "Chicago: CHI1..CHI4 (CHI5 disabled)". CHI5 was
+  deleted 2026-07-13, not disabled; dropped the parenthetical.
+- Repo `CLAUDE.md` listed one of the two CI workflows; added `config-tests.yml`
+  and the `tests/` tree.
+
 ## [1.7.3] - 2026-07-18
 
 ### Changed

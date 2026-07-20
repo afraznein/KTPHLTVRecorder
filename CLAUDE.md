@@ -18,6 +18,8 @@ This will:
 - `compile.sh` - WSL compile script (also generates `build_info.inc` with git SHA + UTC build time)
 - `compiled/` - Compiled .amxx output
 - `documents/hltv_recorder.ini.example` - Config template
+- `tests/config_parse/` - pytest schema guard for the ini template
+- `.github/workflows/config-tests.yml` - ini-template schema test
 - `CHANGELOG.md` - Version history
 - `README.md` - Documentation
 - `.github/workflows/smoke.yml` - Tier 1 build-time smoke (calls KTPInfrastructure's reusable workflow)

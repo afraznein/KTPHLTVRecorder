@@ -10,24 +10,35 @@ Since v1.7.0, HLTV instances record **always-on** via their own config (`record 
 
 - Match-window logging for all match types (`.ktp`, `.scrim`, `.draft`, `.12man`, `.ktpOT`, `.draftOT`) — the renamer's input contract
 - 1:1 game server to HLTV pairing
-- **Match-start health check** - Async `GET /hltv/<port>/state`; warns in chat if HLTV is unreachable, offline, or not recording. Warn-only: it never restarts or recovers anything on its own
+- **Match-start health check** - Async `GET /hltv/<port>/state`; warns in chat if HLTV is unreachable, offline, or not recording. Warn-only: it never restarts or recovers anything on its own. If `hltv_api_url` or `hltv_api_key` is unset the check is skipped entirely and the optimistic "recording" announcement prints anyway — the only signal is the boot-time warning in the server log
 - **Recording announcements** - Verified match-start chat with the expected demo glob + portal URL; match-end chat pointing at the portal
-- **Admin HLTV restart command** - `.hltvrestart` or `/hltvrestart` to restart the paired HLTV instance (HTTP POST with X-Auth-Key, Discord audit)
+- **Admin HLTV restart command** - `.hltvrestart` or `/hltvrestart` to restart the paired HLTV instance (ADMIN_RCON; HTTP POST with X-Auth-Key, Discord audit)
 
 ## Requirements
 
-- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.1+ (provides `ktp_match_start`/`ktp_match_end` forwards)
-- AMX Mod X Curl module
+- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.4+ (provides `ktp_match_start`/`ktp_match_end` forwards)
+- KTP AMXX Curl module
 - [ktp_discord.inc](https://github.com/afraznein/KTPMatchHandler) - Shared Discord library (for audit notifications)
+- `ktp_version_reporter.inc` - Registers this plugin with the fleet-wide `amx_ktp_versions` rcon command (ADMIN_RCON), which reports version and build SHA
 - HLTV API service running on data server
 - Paired HLTV instance per game server, with `record auto_<friendly>` in its config (the actual recording trigger)
 - `hltv-demo-renamer` service on the data server (produces the canonical filenames)
 
+> **The KTPMatchHandler coupling is by name at runtime, with no compile-time link.**
+> This plugin includes no KTPMatchHandler header, and its `MatchType` enum is a local
+> mirror of KTPMatchHandler's. If a forward is renamed or re-signatured, or the enum is
+> reordered upstream, nothing errors at build or load time — demos just silently stop
+> being renamed, or get mislabelled. Edit and recompile this plugin after any such change.
+
 ## Installation
 
-1. Copy `KTPHLTVRecorder.amxx` to `addons/amxmodx/plugins/`
+1. Build with `bash compile.sh`, then copy `compiled/KTPHLTVRecorder.amxx` to
+   `addons/ktpamx/plugins/`. (Not `addons/amxmodx/` — this plugin consumes
+   KTPMatchHandler forwards and KTPAMXX natives, so it only runs on the KTP stack.)
 2. Add to `plugins.ini`: `KTPHLTVRecorder.amxx`
-3. Copy `hltv_recorder.ini.example` to `configs/hltv_recorder.ini`
+3. Copy `documents/hltv_recorder.ini.example` to `addons/ktpamx/configs/hltv_recorder.ini`
+   (the plugin resolves it via `get_configsdir()`; a file anywhere else is never read
+   and `.hltvrestart` stays unavailable)
 4. Configure your HLTV API settings
 
 ## Configuration
@@ -71,7 +82,7 @@ The plugin can't predict `<hltv_ts>` at match start, so chat announces a glob ke
 ## How It Works
 
 1. HLTV instances are always recording — `record auto_<friendly>` in each HLTV config at boot. The plugin never sends record/stop commands
-2. On `ktp_match_start`: plugin logs `[KTP HLTV] MATCH_WINDOW_OPEN match_id=... half=... match_type=... map=... hltv_port=... wall_time=...`
+2. On `ktp_match_start`: plugin logs `[KTP HLTV] MATCH_WINDOW_OPEN match_id=... half=... match_type=... map=... hltv_port=... wall_time=... enabled=<0|1>`
 3. Still at match start (if `hltv_enabled`): async `/state` health check — success announces the expected demo glob + portal URL in chat; failure prints an explicit warning (API unreachable / HLTV offline / not recording). Warn-only — no recovery is attempted
 4. On `ktp_match_end`: plugin logs `MATCH_WINDOW_CLOSE` with the final score and announces the portal location in chat
 5. The `hltv-demo-renamer` service tails the amxx logs, associates `auto_*` segments with match windows, and renames them to canonical filenames within ~30s of match end

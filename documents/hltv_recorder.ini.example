@@ -28,7 +28,7 @@ hltv_port = 27020
 ;   Dallas:    DAL1..DAL5
 ;   Denver:    DEN1..DEN5
 ;   New York:  NY1..NY5
-;   Chicago:   CHI1..CHI4   (CHI5 disabled)
+;   Chicago:   CHI1..CHI4
 hltv_friendly = ATL1
 
 ; (legacy; ignored in v1.7.0+ — recording is driven by HLTV cfg, not this plugin)
