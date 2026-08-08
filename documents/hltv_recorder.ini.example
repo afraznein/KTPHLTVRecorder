@@ -22,7 +22,7 @@ hltv_port = 27020
 
 ; Fleet-friendly alias (UPPERCASE) — drives the portal URL hint shown in
 ; match-start chat and the demo glob the renamer service produces.
-; Must match the directory name under http://74.91.112.242/demos/<X>/.
+; Must match the directory name under https://fastdl.ktpdod.com/demos/<X>/.
 ; Mapping (added v1.7.0):
 ;   Atlanta:   ATL1..ATL5
 ;   Dallas:    DAL1..DAL5
