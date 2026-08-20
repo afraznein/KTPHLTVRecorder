@@ -43,6 +43,19 @@ hltv_friendly = <UPPER-alias>     ; e.g. ATL1 — drives chat demo glob + portal
 ```
 `hltv_stop_delay` is a legacy field, ignored since v1.7.0.
 
+⚠️ **`hltv_port` names a proxy on a shared host, not a local resource.** Whatever
+port it holds is where `.hltvrestart` and the health check land, so a config cloned
+across a region restarts and reports on someone else's proxy — mid-broadcast, with
+no error anywhere. Every Dallas instance once shipped pointed at Atlanta 1. Validate
+the pairing per instance; never per template.
+
+🔑 **Rotating `hltv_api_key` takes two nightlies, in this order.** This file is read
+once at `plugin_init`, so a new key only reaches the plugin at the next game-server
+restart. Teach the API to accept the old key *or* the new one first, then write the
+new value to every instance's config, let the nightly restarts activate both sides,
+and only then drop the old key. The failure mode is not opening that window — it is
+forgetting to close it.
+
 Each game server needs its own config with its paired HLTV port. The HLTV port mapping is documented in `KTP Git Projects/CLAUDE.md` under "Current Servers" (game ports 27015-27019, HLTV ports 27020-27044 across the fleet).
 
 ## Recording Architecture (v1.7.0+)
@@ -52,14 +65,18 @@ Game Server Plugin --amxx log lines--> hltv-demo-renamer (data server) --rename-
 Game Server Plugin --HTTP POST------> HLTV API (data server :8087) --FIFO pipe--> HLTV Instance  (.hltvrestart + /state health check only)
 ```
 
-Recording is always-on: each HLTV instance's cfg carries `record auto_<friendly>` at boot, so HLTV records continuously and rotates segments on source-reconnect. The plugin never sends `record`/`stoprecording` — per the 2026-04-29 investigation, HLTV processes record commands one-per-source-reconnect with a sticky basename, so per-match commands caused cross-match bleed no matter how the plugin polled (see CHANGELOG 1.6.0/1.7.0).
+Recording is always-on: each HLTV instance's cfg carries `record auto_<friendly>` at boot, so HLTV records continuously and rotates segments on source-reconnect. What drives a reconnect is the **match structure itself** — HLTV reconnects to the game server after each half ends, so segment boundaries are half boundaries. There is no polling interval to tune; `autoretry 1` only means "reconnect if disconnected". That cadence is why matching demo segments to logged match windows by time works at all. The plugin never sends `record`/`stoprecording` — per the 2026-04-29 investigation, HLTV processes record commands one-per-source-reconnect with a sticky basename, so per-match commands caused cross-match bleed no matter how the plugin polled (see CHANGELOG 1.6.0/1.7.0).
 
 The plugin's job per match:
 1. `ktp_match_start` → log `[KTP HLTV] MATCH_WINDOW_OPEN match_id=... half=... match_type=... map=... hltv_port=... wall_time=...`
 2. If `hltv_enabled`: async `GET /hltv/<port>/state` health check, then chat — either the expected demo glob + portal URL, or an explicit warning (API unreachable / HLTV offline / not recording). **Warn-only**: the health check never restarts or recovers anything.
 3. `ktp_match_end` → log `MATCH_WINDOW_CLOSE` with score; chat points players at the portal.
 
-The `MATCH_WINDOW_*` lines are the renamer's input contract — emitted regardless of `hltv_enabled`, format must stay stable (renamer parses with regexes; matchtype regex is lowercase-only).
+The `MATCH_WINDOW_*` lines are the renamer's input contract — emitted regardless of `hltv_enabled`, format must stay stable (renamer parses with regexes; matchtype regex is lowercase-only). The contract is **not** that a line appears once: `ktp_match_start` can double-fire for h1, seconds or minutes apart with distinct `wall_time` values, so anything consuming these lines has to be idempotent on `(port, match_id, half)`. The renamer already is; a new consumer that assumes uniqueness will silently mis-close windows.
+
+⚠️ **`recording: false` from `/state` is not evidence that HLTV is idle.** The API answers by scraping the proxy's recent journal for HLTV's `Recording to <file>, Length` line, and HLTV emits that line **only in response to an rcon `status`** — nothing produces it periodically. On a quiet server every match running longer than the scrape window therefore looks idle, which is exactly why this check is warn-only and why its warnings have been fleet-wide false positives while demos were physically growing. Trust it only when something has just triggered a `status`; never wire recovery logic to it.
+
+⚠️ **A green systemd unit is not a live proxy.** HLTV is fed its commands through a FIFO held open on stdin, which never reaches EOF — so a proxy that hits a fatal error prints its stop banner and then *parks* at the console prompt instead of exiting. systemd sees a healthy PID and `Restart=` never fires. This is the state where `/state` and recording are both dead while everything upstream reads fine, and `.hltvrestart` is the lever that resolves it.
 
 The HLTV API service, FIFO pipes, HLTV wrapper script, and renamer all live on the data server. See `KTPInfrastructure/docs/TECHNICAL_GUIDE.md` for the implementation-side details (paths, systemd units, auth setup).
 

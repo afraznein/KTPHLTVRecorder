@@ -31,6 +31,11 @@ keep it that way by not reintroducing the pattern it was already fixed for.
 - The `MATCH_WINDOW_*` log line format is a parsing contract with the renamer
   (regexes, lowercase match-type prefixes). Changing the format without updating
   the renamer breaks demo naming fleet-wide silently — no error surfaces here.
+- **The paired HLTV proxy is a connected client**, not an invisible observer. It
+  occupies a player slot and its reconnect runs `client_putinserver`, so plugin
+  forwards fire for it like any other join. Anything keyed on "a player connected"
+  or on a player count has to account for it — and work started from that forward at
+  restart time can find itself in flight when the engine quits.
 - **Dependency on KTPMatchHandler**: recording/window triggers come from its
   `ktp_match_start`/`ktp_match_end` forwards. Recompile this plugin after ANY
   KTPMatchHandler change that moves, renames, or changes the signature of those
