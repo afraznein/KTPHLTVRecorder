@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.7.3
+/* KTP HLTV Recorder v1.7.4
  * Match window logger (Phase F+A architecture)
  *
  * AUTHOR: Nein_
- * VERSION: 1.7.3
- * DATE: 2026-07-18
+ * VERSION: 1.7.4
+ * DATE: 2026-09-28
  *
  * DESCRIPTION:
  * In v1.7.0 the recording-control responsibility moves from this plugin to
@@ -62,6 +62,8 @@
  * reads these from each game server's amxx log via paramiko-tail.
  *
  * CHANGELOG (most recent first; full history in CHANGELOG.md):
+ *   v1.7.4 (2026-09-28): rebuild against the ktp_discord.inc that prewarms the
+ *     relay once per process instead of on every map change. No source change.
  *   v1.7.3 (2026-07-18): demo-portal chat links repointed from the raw IP to
  *     https://fastdl.ktpdod.com/demos (HTTPS; ktpdod.com migration). Cosmetic —
  *     human-clicked browser links, so the FastDL HTTP-only-client caveat doesn't apply.
@@ -88,7 +90,7 @@
 #include <ktp_version_reporter>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.7.3"
+#define PLUGIN_VERSION "1.7.4"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command

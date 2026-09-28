@@ -45,6 +45,20 @@ Further corrections, all verified against source:
 - Repo `CLAUDE.md` listed one of the two CI workflows; added `config-tests.yml`
   and the `tests/` tree.
 
+## [1.7.4] - 2026-09-28
+
+### Fixed
+- **Relay prewarm fired on every map change.** No source change in this plugin;
+  it is a rebuild against KTPAMXX's current `ktp_discord.inc`, which latches
+  `ktp_discord_prewarm()` to once per process (KTPAMXX `a6b9596f5`). The 1.7.3
+  build on the fleet predates that include, so in extension mode it sent a
+  `GET /health` to the Discord relay on every map change. Those requests are
+  most of what reaches the relay after a quiet spell, so they absorb its
+  scale-from-zero cold start and log `curl error: Timeout was reached (code 28)`,
+  and real embeds from other plugins sent in the same window can be lost.
+- New label because the bytes change: the fleet binary and a rebuild of the same
+  source would both have reported 1.7.3.
+
 ## [1.7.3] - 2026-07-18
 
 ### Changed

@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.7.3** - Match-window logger for the always-on HLTV recording pipeline.
+**Version 1.7.4** - Match-window logger for the always-on HLTV recording pipeline.
 
 ## Overview
 
