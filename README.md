@@ -1,6 +1,6 @@
 # KTPHLTVRecorder
 
-**Version 1.7.4** - Match-window logger for the always-on HLTV recording pipeline.
+**Version 1.8.0** - Match-window logger for the always-on HLTV recording pipeline.
 
 ## Overview
 
@@ -16,7 +16,7 @@ Since v1.7.0, HLTV instances record **always-on** via their own config (`record 
 
 ## Requirements
 
-- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.4+ (provides `ktp_match_start`/`ktp_match_end` forwards)
+- [KTPMatchHandler](https://github.com/afraznein/KTPMatchHandler) v0.10.4+ (provides `ktp_match_start`/`ktp_match_end` forwards); v0.10.188+ also fires `ktp_match_aborted`. An older handler simply never fires it
 - KTP AMXX Curl module
 - [ktp_discord.inc](https://github.com/afraznein/KTPMatchHandler) - Shared Discord library (for audit notifications)
 - `ktp_version_reporter.inc` - Registers this plugin with the fleet-wide `amx_ktp_versions` rcon command (ADMIN_RCON), which reports version and build SHA
@@ -24,11 +24,11 @@ Since v1.7.0, HLTV instances record **always-on** via their own config (`record 
 - Paired HLTV instance per game server, with `record auto_<friendly>` in its config (the actual recording trigger)
 - `hltv-demo-renamer` service on the data server (produces the canonical filenames)
 
-> **The KTPMatchHandler coupling is by name at runtime, with no compile-time link.**
-> This plugin includes no KTPMatchHandler header, and its `MatchType` enum is a local
-> mirror of KTPMatchHandler's. If a forward is renamed or re-signatured, or the enum is
-> reordered upstream, nothing errors at build or load time — demos just silently stop
-> being renamed, or get mislabelled. Edit and recompile this plugin after any such change.
+> **Forward signatures are checked at compile time (1.8.0+); names and the enum are not.**
+> The build includes KTPMatchHandler's `ktp_matchhandler.inc`, so a re-signatured
+> forward fails the compile. A renamed forward, or a reordered `MatchType` enum (still a
+> local mirror of KTPMatchHandler's), still fails silently at runtime: demos stop being
+> renamed, or get mislabelled. Recompile this plugin after any such change upstream.
 
 ## Installation
 
@@ -84,7 +84,7 @@ The plugin can't predict `<hltv_ts>` at match start, so chat announces a glob ke
 1. HLTV instances are always recording — `record auto_<friendly>` in each HLTV config at boot. The plugin never sends record/stop commands
 2. On `ktp_match_start`: plugin logs `[KTP HLTV] MATCH_WINDOW_OPEN match_id=... half=... match_type=... map=... hltv_port=... wall_time=... enabled=<0|1>`
 3. Still at match start (if `hltv_enabled`): async `/state` health check — success announces the expected demo glob + portal URL in chat; failure prints an explicit warning (API unreachable / HLTV offline / not recording). Warn-only — no recovery is attempted
-4. On `ktp_match_end`: plugin logs `MATCH_WINDOW_CLOSE` with the final score and announces the portal location in chat
+4. On `ktp_match_end`: plugin logs `MATCH_WINDOW_CLOSE` with the final score and announces the portal location in chat. On `ktp_match_aborted` (a second-half `.cancel` or a `.forcereset`, 1.8.0+) it logs the same line with `reason=<secondhalf_cancel|forcereset>` in place of `score=`, and prints nothing
 5. The `hltv-demo-renamer` service tails the amxx logs, associates `auto_*` segments with match windows, and renames them to canonical filenames within ~30s of match end
 
 Both `MATCH_WINDOW_*` lines are emitted regardless of `hltv_enabled` — they are the renamer's input contract and their format must stay stable.
@@ -104,6 +104,11 @@ Requires WSL with KTPAMXX compiler:
 ```bash
 ./compile.sh
 ```
+
+`compile.sh` takes `ktp_matchhandler.inc` from `$KTPMATCHHANDLER_ROOT`, else a sibling
+`../KTPMatchHandler` checkout, else the vendored `include/` copy (which is what CI
+builds with). It warns when the vendored copy differs from the checkout's; refresh it
+when KTPMatchHandler's forwards change.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
