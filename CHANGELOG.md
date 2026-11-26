@@ -45,6 +45,29 @@ Further corrections, all verified against source:
 - Repo `CLAUDE.md` listed one of the two CI workflows; added `config-tests.yml`
   and the `tests/` tree.
 
+## [1.8.0] - 2026-11-25
+
+### Added
+
+- **`MATCH_WINDOW_CLOSE` on `ktp_match_aborted`.** KTPMatchHandler 0.10.188 fires this
+  forward on a second-half `.cancel` and on `.forcereset`, the two match closes that
+  fire no `ktp_match_end`. Until now both left the demo window open, and the renamer
+  had to bound it at the next match's OPEN or abandon it after 4 h. The handler logs
+  the same line as a match end, with `reason=<secondhalf_cancel|forcereset>` where
+  `score=` would be: there is no final score, and `0-0` would read as one. Field
+  order up to `wall_time=` is unchanged, so the renamer and the true-start backfill
+  parse it as they parse any CLOSE. No chat line; the cancel or reset already
+  announces itself. Against a KTPMatchHandler older than 0.10.188 the forward never
+  fires, which is exactly the 1.7.4 behaviour.
+- **Builds against `ktp_matchhandler.inc`.** The include declares KTPMatchHandler's
+  forwards, so a handler here whose signature drifts is a compile error rather than a
+  forward that silently never fires. `compile.sh` takes it from the KTPMatchHandler
+  checkout when one is found and warns if the vendored `include/` copy (what CI uses)
+  differs. `tests/config_parse/test_match_aborted_close.py` checks the new line
+  against the renamer's and the backfill's parsers, and the vendored include against a
+  sibling KTPMatchHandler checkout when one exists.
+- `config-tests` now also runs when the `.sma` or `include/` changes.
+
 ## [1.7.4] - 2026-09-28
 
 ### Fixed

@@ -63,6 +63,30 @@ cp "$COMPILER" "$BUILD_DIR/"
 cp "$COMPILER_LIB" "$BUILD_DIR/"
 cp -r "$INCLUDE_DIR" "$BUILD_DIR/include"
 
+# ktp_matchhandler.inc declares KTPMatchHandler's forwards, so a handler here whose
+# signature drifts fails the compile instead of silently never firing. Prefer the
+# MatchHandler checkout's copy; the vendored include/ copy is what CI builds with.
+MH_INC=""
+if [ -n "${KTPMATCHHANDLER_ROOT:-}" ]; then
+    MH_INC="$KTPMATCHHANDLER_ROOT/ktp_matchhandler.inc"
+elif [ -f "$SCRIPT_DIR/../KTPMatchHandler/ktp_matchhandler.inc" ]; then
+    MH_INC="$SCRIPT_DIR/../KTPMatchHandler/ktp_matchhandler.inc"
+fi
+VENDORED_MH_INC="$SCRIPT_DIR/include/ktp_matchhandler.inc"
+if [ -n "$MH_INC" ] && [ -f "$MH_INC" ]; then
+    sed 's/\r$//' "$MH_INC" > "$BUILD_DIR/include/ktp_matchhandler.inc"
+    echo "[INFO] ktp_matchhandler.inc: $MH_INC"
+    if ! sed 's/\r$//' "$VENDORED_MH_INC" | cmp -s - "$BUILD_DIR/include/ktp_matchhandler.inc"; then
+        echo "[WARN] include/ktp_matchhandler.inc differs from the KTPMatchHandler copy -- refresh it so CI builds the same signatures."
+    fi
+elif [ -n "${KTPMATCHHANDLER_ROOT:-}" ]; then
+    echo "[ERROR] KTPMATCHHANDLER_ROOT is set but has no ktp_matchhandler.inc: $MH_INC"
+    exit 1
+else
+    sed 's/\r$//' "$VENDORED_MH_INC" > "$BUILD_DIR/include/ktp_matchhandler.inc"
+    echo "[INFO] ktp_matchhandler.inc: vendored copy (no KTPMatchHandler checkout found)"
+fi
+
 # Generate build_info.inc for ktp_version_reporter — git SHA + build time
 # get baked into the .amxx so `amx_ktp_versions` rcon can report what's
 # actually deployed. Falls back to "unknown" off-toolchain.

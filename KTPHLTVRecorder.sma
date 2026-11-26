@@ -1,9 +1,9 @@
-/* KTP HLTV Recorder v1.7.4
+/* KTP HLTV Recorder v1.8.0
  * Match window logger (Phase F+A architecture)
  *
  * AUTHOR: Nein_
- * VERSION: 1.7.4
- * DATE: 2026-09-28
+ * VERSION: 1.8.0
+ * DATE: 2026-11-25
  *
  * DESCRIPTION:
  * In v1.7.0 the recording-control responsibility moves from this plugin to
@@ -15,7 +15,8 @@
  *
  * What this plugin does in v1.7.0:
  *   - Emits structured MATCH_WINDOW_OPEN / MATCH_WINDOW_CLOSE log lines on
- *     ktp_match_start / ktp_match_end. The hltv-demo-renamer service reads
+ *     ktp_match_start / ktp_match_end (and CLOSE on ktp_match_aborted,
+ *     since v1.8.0). The hltv-demo-renamer service reads
  *     these to associate HLTV's auto_* demo segments with match_ids and
  *     rename them post-match to
  *     `<matchtype>_<match_id>-<UPPER_FRIENDLY>_<half>-<hltv_ts>-<map>.dem`
@@ -35,7 +36,10 @@
  *     doesn't issue per-match record commands.
  *
  * REQUIREMENTS:
- * - KTPMatchHandler v0.10.4+ (for ktp_match_start / ktp_match_end forwards)
+ * - KTPMatchHandler v0.10.4+ (for ktp_match_start / ktp_match_end forwards);
+ *   v0.10.188+ for ktp_match_aborted. An older handler never fires it, which is
+ *   the pre-1.8.0 behaviour, not an error.
+ * - ktp_matchhandler.inc at build time (forward signatures; see compile.sh)
  * - Curl module (for the `.hltvrestart` admin command)
  * - Each HLTV instance's cfg must have `record auto_<friendly>` (Phase 1a)
  *
@@ -54,14 +58,18 @@
  * during rollout — operator can remove the line at next config touch.)
  *
  * LOG OUTPUT FORMAT (the renamer's input contract — must match the log_amx
- * sites in ktp_match_start/ktp_match_end exactly):
+ * sites in ktp_match_start/ktp_match_end/ktp_match_aborted exactly):
  *   [KTP HLTV] MATCH_WINDOW_OPEN  match_id=<id> half=<h> match_type=<t> map=<m> hltv_port=<p> wall_time=<unix> enabled=<0|1>
  *   [KTP HLTV] MATCH_WINDOW_CLOSE match_id=<id> match_type=<t> map=<m> hltv_port=<p> wall_time=<unix> score=<a>-<b>
+ *   [KTP HLTV] MATCH_WINDOW_CLOSE match_id=<id> match_type=<t> map=<m> hltv_port=<p> wall_time=<unix> reason=<secondhalf_cancel|forcereset>
  *
  * Both lines are emitted regardless of `hltv_enabled` value. The renamer
  * reads these from each game server's amxx log via paramiko-tail.
  *
  * CHANGELOG (most recent first; full history in CHANGELOG.md):
+ *   v1.8.0 (2026-11-25): MATCH_WINDOW_CLOSE on ktp_match_aborted (2nd-half
+ *     .cancel, .forcereset), which previously left the window open. Builds
+ *     against ktp_matchhandler.inc so a forward signature drift fails the compile.
  *   v1.7.4 (2026-09-28): rebuild against the ktp_discord.inc that prewarms the
  *     relay once per process instead of on every map change. No source change.
  *   v1.7.3 (2026-07-18): demo-portal chat links repointed from the raw IP to
@@ -90,7 +98,7 @@
 #include <ktp_version_reporter>
 
 #define PLUGIN_NAME    "KTP HLTV Recorder"
-#define PLUGIN_VERSION "1.7.4"
+#define PLUGIN_VERSION "1.8.0"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Admin flag for HLTV restart command
@@ -109,6 +117,9 @@ enum MatchType {
     MATCH_TYPE_KTP_OT = 4,
     MATCH_TYPE_DRAFT_OT = 5
 };
+
+// After the enum: the forward declarations carry this plugin's MatchType tag.
+#include <ktp_matchhandler>
 
 // Configuration (loaded from hltv_recorder.ini)
 new g_hltvEnabled = 0;
@@ -285,6 +296,19 @@ public ktp_match_end(const matchId[], const map[], MatchType:matchType, team1Sco
                 typeStr, matchId);
         }
     }
+}
+
+// Forward from KTPMatchHandler — match closed with no result (2nd-half .cancel
+// or .forcereset). Same window close as ktp_match_end; reason= replaces score=
+// because there is no final score, and a 0-0 would read as one.
+public ktp_match_aborted(const matchId[], const map[], MatchType:matchType, const reason[]) {
+    new typeStr[16];
+    match_type_string(matchType, typeStr, charsmax(typeStr));
+
+    log_amx(
+        "[KTP HLTV] MATCH_WINDOW_CLOSE match_id=%s match_type=%s map=%s hltv_port=%d wall_time=%d reason=%s",
+        matchId, typeStr, map, g_hltvPort, get_systime(), reason
+    );
 }
 
 // ============================================================================
